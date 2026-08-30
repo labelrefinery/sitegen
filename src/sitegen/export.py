@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from foxglove_schemas_protobuf.FrameTransform_pb2 import FrameTransform
 from foxglove_schemas_protobuf.JointStates_pb2 import JointStates
 from foxglove_schemas_protobuf.LocationFix_pb2 import LocationFix
 from foxglove_schemas_protobuf.PointCloud_pb2 import PointCloud
@@ -192,6 +193,34 @@ def write_ego_csv(path: Path, out: Path) -> int:
             x = (fix.longitude - lon0) * 111_320.0 * float(np.cos(np.radians(lat0)))
             y = (fix.latitude - lat0) * 110_540.0
             writer.writerow([f"{(msg.log_time - base_ns) / 1e9:.4f}", f"{x:.4f}", f"{y:.4f}"])
+            rows += 1
+    return rows
+
+
+def write_tf_csv(path: Path, out: Path) -> int:
+    """`t,x,y,z,qx,qy,qz,qw` from /tf -- the sensor pose in the map frame.
+
+    Observable, so the pipeline is allowed it. Points arrive in the sensor
+    frame and every downstream stage reasons in world coordinates, so this is
+    the transform that makes the rest possible.
+    """
+    base_ns: int | None = None
+    rows = 0
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "rb") as f, open(out, "w", newline="") as fo:
+        writer = csv.writer(fo)
+        writer.writerow(["t", "x", "y", "z", "qx", "qy", "qz", "qw"])
+        for _, _, msg in make_reader(f).iter_messages(topics=["/tf"]):
+            if base_ns is None:
+                base_ns = msg.log_time
+            tf = FrameTransform()
+            tf.ParseFromString(msg.data)
+            tr, q = tf.translation, tf.rotation
+            writer.writerow(
+                [f"{(msg.log_time - base_ns) / 1e9:.4f}",
+                 f"{tr.x:.6f}", f"{tr.y:.6f}", f"{tr.z:.6f}",
+                 f"{q.x:.8f}", f"{q.y:.8f}", f"{q.z:.8f}", f"{q.w:.8f}"]
+            )
             rows += 1
     return rows
 

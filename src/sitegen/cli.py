@@ -37,6 +37,10 @@ def _cmd_ego(args: argparse.Namespace) -> None:
     print(f"wrote {args.out}: {export.write_ego_csv(args.mcap, args.out)} rows")
 
 
+def _cmd_tf(args: argparse.Namespace) -> None:
+    print(f"wrote {args.out}: {export.write_tf_csv(args.mcap, args.out)} rows")
+
+
 def _cmd_joints(args: argparse.Namespace) -> None:
     print(f"wrote {args.out}: {export.write_joints_csv(args.mcap, args.out)} rows")
 
@@ -52,6 +56,7 @@ def _cmd_score(args: argparse.Namespace) -> None:
         truth=scoring.read_csv(args.truth),
         threshold_m=args.threshold,
         class_agnostic=not args.class_aware,
+        exclude=tuple(args.exclude or ()),
     )
     print(scoring.render(results))
     if args.json:
@@ -100,6 +105,11 @@ def main() -> None:
     e.add_argument("--out", type=Path, required=True)
     e.set_defaults(func=_cmd_ego)
 
+    tf = sub.add_parser("tf", help="export sensor pose as t,x,y,z,qx,qy,qz,qw")
+    tf.add_argument("mcap", type=Path)
+    tf.add_argument("--out", type=Path, required=True)
+    tf.set_defaults(func=_cmd_tf)
+
     j = sub.add_parser("joints", help="export ego proprioception as t,swing,boom,stick,bucket")
     j.add_argument("mcap", type=Path)
     j.add_argument("--out", type=Path, required=True)
@@ -119,6 +129,15 @@ def main() -> None:
         action="store_true",
         help="require the predicted class to match; off by default because a "
         "cold-start pipeline has no class names to be right or wrong about",
+    )
+    c.add_argument(
+        "--exclude",
+        nargs="*",
+        metavar="CLASS",
+        help="drop these truth classes before scoring. Use it for objects the "
+        "sensor cannot resolve at all -- grade stakes are 50mm square and "
+        "collect a couple of returns, so leaving them in makes recall a "
+        "measure of the LiDAR rather than of the labeler",
     )
     c.add_argument("--json", type=Path, help="also write results here")
     c.set_defaults(func=_cmd_score)

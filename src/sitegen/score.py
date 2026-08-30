@@ -113,7 +113,11 @@ def score(
     truth: list[Row],
     threshold_m: float = DEFAULT_THRESHOLD_M,
     class_agnostic: bool = True,
+    exclude: tuple[str, ...] = (),
 ) -> dict[str, dict[str, float | int]]:
+    if exclude:
+        truth = [r for r in truth if r.cls not in exclude]
+        pred = [r for r in pred if r.cls not in exclude]
     def key(r: Row) -> str:
         return "all" if class_agnostic else r.cls
 
