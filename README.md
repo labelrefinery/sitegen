@@ -90,11 +90,52 @@ Roughly 1.4 MB of scene per second at defaults, so a 60 s run is ~85 MB.
 Samples are published as release assets rather than committed — pin one by URL
 and checksum so two pipelines under comparison consume byte-identical input.
 
-## Reading it
+## Reading it in Foxglove
 
-Drag the file into [Foxglove](https://foxglove.dev) — every topic renders
-natively, including the ground-truth cuboids, so you can watch a pipeline's
-labels drift against truth.
+Every topic uses a well-known Foxglove schema, so there is nothing to install
+and no custom panel to write.
+
+1. Open [Foxglove](https://foxglove.dev) and drag `site.mcap` in (or `Cmd/Ctrl-O`).
+2. Add a **3D** panel. Set **Display frame** to `map`.
+3. In the panel's topic list turn on:
+   - `/lidar/points` — set *Color by* to `intensity` for a legible sweep
+   - `/ground_truth/actors` — the oracle cuboids, coloured by class
+   - `/terrain/heightmap` — the static ground and stockpiles
+4. Add a **Plot** panel on `/ego/joint_states` to watch the dig cycle —
+   `swing`, `boom`, `stick` and `bucket` trace one cycle every 15 s, and the
+   flat stretch at t≈26–34 s is the machine walking to its second station.
+
+`/ground_truth/*` is the oracle. It is there so you can *see* what a labeler
+was up against; a labeler must never read it.
+
+## Seeing a pipeline's labels against the truth
+
+Predictions go in their own file, so the scene stays immutable and one 86 MB
+recording serves any number of pipeline runs:
+
+```sh
+sitegen overlay round0.csv round1.csv round2.csv \
+    --out labels.mcap --scene site.mcap
+```
+
+That writes one `/pred/<name>` topic per input CSV — cuboids plus billboarded
+track ids, one categorical colour each — and comes to a few hundred KB.
+`--scene` reads `t = 0` from the recording so the two line up exactly.
+
+Then **open both files together**. Foxglove merges local files into a single
+playback timeline, which is exactly the "a main recording plus a related file"
+case it documents:
+
+```sh
+foxglove site.mcap labels.mcap      # or drag both in at once
+```
+
+Now the 3D panel has `/ground_truth/actors` and every `/pred/*` set on one
+timeline, each independently toggleable. Scrub to t≈25 s and watch a stage
+invent objects on the stockpile, or turn two rounds on at once to see which
+one stops. If you would rather keep the sources visually separate than merged,
+Foxglove's [comparison mode](https://docs.foxglove.dev/docs/visualization/comparison-mode)
+does that instead.
 
 From Daft:
 

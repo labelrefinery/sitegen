@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from . import export
+from . import export, overlay
 from . import score as scoring
 from .writer import generate
 
@@ -48,6 +48,21 @@ def _cmd_joints(args: argparse.Namespace) -> None:
 def _cmd_sweeps(args: argparse.Namespace) -> None:
     n = export.write_sweeps(args.mcap, args.out)
     print(f"wrote {n} sweeps to {args.out} (float32 x,y,z,intensity; see index.csv)")
+
+
+def _cmd_overlay(args: argparse.Namespace) -> None:
+    epoch = (
+        overlay.scene_epoch_ns(args.scene) if args.scene else overlay.DEFAULT_EPOCH_NS
+    )
+    counts = overlay.write_overlay(
+        args.predictions, args.out, epoch_ns=epoch, show_ids=not args.no_ids
+    )
+    size_kb = args.out.stat().st_size / 1e3
+    print(f"wrote {args.out} ({size_kb:.0f} KB)")
+    for topic, n in sorted(counts.items()):
+        print(f"  {topic:32s} {n:5d} messages")
+    print("\nOpen it together with the scene -- Foxglove merges local files into")
+    print("one timeline:  foxglove site.mcap " + str(args.out))
 
 
 def _cmd_score(args: argparse.Namespace) -> None:
@@ -119,6 +134,20 @@ def main() -> None:
     s.add_argument("mcap", type=Path)
     s.add_argument("--out", type=Path, required=True)
     s.set_defaults(func=_cmd_sweeps)
+
+    o = sub.add_parser(
+        "overlay",
+        help="write predicted labels to their own MCAP, to view beside the scene",
+    )
+    o.add_argument("predictions", type=Path, nargs="+", help="tracker-schema CSVs")
+    o.add_argument("--out", type=Path, required=True)
+    o.add_argument(
+        "--scene",
+        type=Path,
+        help="read t=0 from this scene file; otherwise the default epoch is assumed",
+    )
+    o.add_argument("--no-ids", action="store_true", help="omit track-id labels")
+    o.set_defaults(func=_cmd_overlay)
 
     c = sub.add_parser("score", help="score predicted tracks against the oracle")
     c.add_argument("pred", type=Path)
