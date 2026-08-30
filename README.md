@@ -32,7 +32,9 @@ it describes — the same pass wrote them.
 
 A 20-tonne excavator running a dig-swing-dump-return cycle (15 s, five or six
 passes to fill a bed), loading an articulated hauler that backs in, is loaded,
-and hauls off before a second truck takes its place. A spotter holds station; a
+and hauls off before a second truck takes its place. Part-way through, the
+machine walks 6.5 m along the trench line to a second dig station -- house
+squared up over the tracks, boom tucked -- and the hauler repositions with it. A spotter holds station; a
 second worker crosses the swing radius around t=25 s. Two stockpiles sit at the
 angle of repose, a row of grade stakes runs along the north edge, and dust
 kicks up when the loaded truck pulls away.
@@ -57,6 +59,13 @@ eats returns over a region. A worker at 14 m gets about 20 points; a truck at
 45 m gets a handful. That is where naive clustering stops finding things, and
 where a smoother that carried the track forward from when it was close starts
 to pay.
+
+**The machine travels.** The walk between dig stations is not decoration. A
+fixed sensor origin quietly removes three things worth testing: the map never
+grows, occlusion behind the stockpile never resolves, and there is no driven
+trajectory for an annotation-free terrain labeler to calibrate against --
+which is the free supervision STONE-style methods depend on, exactly as joint
+angles are for the boom chain.
 
 **Nothing is balanced.** Terrain is ~83% of returns, the two workers together
 are ~0.3%. Real class imbalance, not a curated benchmark.

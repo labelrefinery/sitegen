@@ -1,6 +1,6 @@
 [project]
 name = "sitegen"
-version = "0.1.0"
+version = "0.2.0"
 description = "Synthetic construction-site MCAP generator with held-out ground truth"
 readme = "README.md"
 requires-python = ">=3.12"

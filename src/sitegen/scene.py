@@ -26,6 +26,20 @@ DIG_SWING = np.radians(-35.0)
 DUMP_SWING = np.radians(75.0)
 TRUCK_SPOT = (7.5, 9.0, np.radians(105.0))
 
+BASE_YAW = np.radians(15.0)
+TRAVEL_START_S = 26.0
+TRAVEL_END_S = 34.0
+TRAVEL_DISTANCE_M = 6.5
+"""How far the machine tracks between stations.
+
+An excavator digging a trench does not stay put. It cuts what it can reach,
+then walks the undercarriage back along the trench line and cuts again --
+roughly 0.8 m/s, house squared up over the tracks, boom tucked. Without this
+the scene has a fixed sensor origin, which quietly removes three things worth
+testing: the map never grows, occlusion behind the stockpile never resolves,
+and there is no driven trajectory for a terrain labeler to calibrate against.
+"""
+
 
 def smoothstep(a: float, b: float, x: float) -> float:
     if b <= a:
@@ -76,6 +90,18 @@ class Scene:
 
     # -- actors ------------------------------------------------------------
 
+    def base_at(self, t: float) -> tuple[float, float]:
+        """Undercarriage position: two dig stations with a walk between."""
+        u = smoothstep(TRAVEL_START_S, TRAVEL_END_S, t)
+        d = TRAVEL_DISTANCE_M * u
+        return (-d * np.cos(BASE_YAW), -d * np.sin(BASE_YAW))
+
+    def travelling(self, t: float) -> float:
+        """1.0 while the machine is walking, 0.0 while it is digging."""
+        rise = smoothstep(TRAVEL_START_S - 1.0, TRAVEL_START_S + 1.5, t)
+        fall = smoothstep(TRAVEL_END_S - 1.5, TRAVEL_END_S + 1.0, t)
+        return rise - fall
+
     def ego_at(self, t: float) -> ExcavatorState:
         """Dig, swing loaded, dump, swing back -- once per CYCLE_S."""
         p = (t % CYCLE_S) / CYCLE_S
@@ -101,7 +127,18 @@ class Scene:
             boom, stick, bucket = lerp(-1.0, -0.15, u), lerp(0.55, 0.9, u), lerp(0.45, 0.2, u)
         else:  # settle over the cut
             swing, boom, stick, bucket = DIG_SWING, -0.15, 0.9, 0.2
-        return ExcavatorState(0.0, 0.0, np.radians(15.0), swing, boom, stick, bucket)
+
+        # Walking overrides the dig cycle: house squared up over the tracks,
+        # boom tucked in. Nobody travels with the boom out.
+        walk = self.travelling(t)
+        if walk > 0.0:
+            swing = lerp(swing, 0.0, walk)
+            boom = lerp(boom, -0.9, walk)
+            stick = lerp(stick, 1.35, walk)
+            bucket = lerp(bucket, -0.6, walk)
+
+        bx, by = self.base_at(t)
+        return ExcavatorState(bx, by, BASE_YAW, swing, boom, stick, bucket)
 
     def truck_at(self, t: float) -> tuple[float, float, float] | None:
         """Backs in, is loaded, hauls off; a second truck takes its place."""
@@ -110,6 +147,11 @@ class Scene:
             if t < arrive - 6.0 or t > depart + 8.0:
                 continue
             x, y, yaw = TRUCK_SPOT
+            if arrive > TRAVEL_END_S:
+                # Haulers reposition with the machine; otherwise the second
+                # load would be a reach the operator would never accept.
+                shift_x, shift_y = self.base_at(t)
+                x, y = x + shift_x, y + shift_y
             if t < arrive:  # backing in along the haul road
                 u = smoothstep(arrive - 6.0, arrive, t)
                 return lerp(x + 22.0, x, u), lerp(y + 14.0, y, u), yaw
