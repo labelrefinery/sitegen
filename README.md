@@ -21,11 +21,11 @@ One file, two groups of topics, and a rule.
 | `/tf` | `foxglove.FrameTransform` | `map` → `lidar` |
 | `/gnss` | `foxglove.LocationFix` | ego global pose |
 | `/terrain/heightmap` | `foxglove.PointCloud` | published once, at t₀ |
-| `/camera/front/image` | `foxglove.CompressedImage` | optional, `--camera-hz` |
-| `/camera/front/calibration` | `foxglove.CameraCalibration` | pinhole K and P |
+| `/camera/<name>/image` | `foxglove.CompressedImage` | optional, `--camera-hz`; four cameras |
+| `/camera/<name>/calibration` | `foxglove.CameraCalibration` | pinhole K and P |
 | `/ground_truth/actors` | `foxglove.SceneUpdate` | **held out** — per-part cuboids |
 | `/ground_truth/points` | `foxglove.PointCloud` | **held out** — per-point instance id |
-| `/ground_truth/camera_instances` | `foxglove.CompressedImage` | **held out** — per-pixel instance id |
+| `/ground_truth/camera_instances/<name>` | `foxglove.CompressedImage` | **held out** — per-pixel instance id |
 
 **A labeler reads the first group. Only the scorer reads `/ground_truth/*`.**
 Both live in one file rather than two so the truth cannot drift from the data
@@ -177,27 +177,49 @@ describe the same surface, because the same ray produced both. Per-pixel
 instance ids come out free, since the raycaster already knows which box each
 ray hit: segmentation ground truth nobody had to draw.
 
-**It is shaded geometry, not photorealism, and that limit is measured rather
-than assumed.** Grounding DINO on a render against the same model on a real
-construction photograph, same prompt (`"excavator . haul truck . worker ."`):
+### The rig is four cameras, and the placement matters more than it sounds
 
-| input | detections |
+A single centre-forward camera spends **22.8% of every frame looking at its own
+boom** — and when Grounding DINO was pointed at one, that boom captured the
+only detection it made. Real machines mount surround-view at the house corners
+for exactly this reason, so `SURROUND_RIG` does too: front-left and front-right
+at the corners panned 35° out, left and right on the sides panned 90°.
+
+Measured across seven swing angles, all four cameras: **0.0% ego occlusion,
+everywhere.** The cameras ride the house, so as the machine swings they sweep
+the whole site, and which one has the clear view changes with the dig cycle.
+
+### What an open-vocabulary detector makes of it
+
+Ten unobstructed views, Grounding DINO, prompt
+`"excavator . haul truck . worker . person ."`:
+
+| | |
 | --- | --- |
-| real photograph | `excavator` **0.858**, `haul truck` **0.771** |
-| sitegen render | `excavator haul` 0.453, on the ego's own boom; truck and worker missed |
+| real construction photograph | `excavator` **0.858**, `haul truck` **0.771** |
+| sitegen renders, 9 of 10 | `haul truck` **0.351 – 0.421** — correct label, every time |
+| sitegen renders, 1 of 10 | nothing |
+| workers, visible in 3 views | **never detected, not once** |
+| grade stakes | never detected |
 
-The model, weights and prompt are fine — the control proves it. Untextured
-cuboids simply do not carry the texture and context an open-vocabulary detector
-keys on. So the camera is here to build and test the *geometric* half of a
-naming pipeline — projection, calibration, image-to-instance association — and
-class naming should be validated against real imagery. Raycasting the
+The control proves the model, weights and prompt are fine. What the renders
+lack is texture and context, so confidence lands at ~0.38 against ~0.8 on a
+photograph — and a person, which is the safety-critical class, is invisible to
+it entirely.
+
+**So: enough to build a naming pipeline on, not enough to trust its labels.**
+A 9-in-10 hit rate with a consistent correct label is plenty of signal to
+develop and test camera → detection → 3D-instance association, because the
+truck's real box is known. It is not a basis for *training* on those names, and
+anything built this way would name machines while silently leaving people
+unnamed.
+
+The two halves turn out to be complementary, which is the useful part:
+**geometry finds the worker and cannot name the machine; the detector names the
+machine and cannot find the worker.** The 97.5% size split covers the person
+case without a model at all. Raycasting the
 [3D-ConHE](https://www.mdpi.com/2076-3417/14/9/3599) meshes would narrow the
-gap; it would not close it.
-
-One finding worth carrying into any camera pipeline: the ego's own boom
-occupied **23% of the frame** and captured the only detection. The same
-proprioception self-mask that cleans the LiDAR should crop the ego out of the
-image before a detector ever sees it.
+gap; only real imagery closes it.
 
 ## Not yet
 

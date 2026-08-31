@@ -44,15 +44,14 @@ from google.protobuf.timestamp_pb2 import Timestamp
 from mcap_protobuf.writer import Writer
 
 from .actors import HOUSE, SLEW_HEIGHT, sensor_pose
-from .camera import CameraIntrinsics, camera_pose, render
+from .camera import SURROUND_RIG, CameraIntrinsics, camera_pose, render
 from .geometry import Array, Box, quat_from_matrix
 from .scene import Scene
 from .sensors import Lidar, sweep
 
 SITE_LAT, SITE_LON = 37.4419, -122.1430
 
-#: Camera mast offset in the house frame, forward of and above the cab.
-CAMERA_OFFSET = np.array([1.6, 0.0, HOUSE[2] + 0.4])
+#: Cameras ride the house, so the rig sweeps the site as the machine swings.
 
 CLASS_COLORS: dict[str, tuple[float, float, float]] = {
     "excavator": (0.98, 0.75, 0.10),
@@ -280,51 +279,66 @@ def generate(
             if camera_every and i % camera_every == 0:
                 house_r = sensor_r
                 house_t = np.array([state.ego.x, state.ego.y, SLEW_HEIGHT])
-                cam_r, cam_t = camera_pose(house_r, house_t, CAMERA_OFFSET)
-                image, instances = render(
-                    intrinsics, cam_r, cam_t, state.boxes, scene.terrain
-                )
-                buf = io.BytesIO()
-                Image.fromarray(image).save(buf, format="JPEG", quality=85)
-                w.write_message(
-                    topic="/camera/front/image",
-                    message=CompressedImage(
-                        timestamp=_ts(ns), frame_id="camera", format="jpeg",
-                        data=buf.getvalue(),
-                    ),
-                    log_time=ns, publish_time=ns,
-                )
-                bump("/camera/front/image")
+                for cam_name, offset, pan in SURROUND_RIG:
+                    cam_r, cam_t = camera_pose(
+                        house_r, house_t, np.array(offset), pan
+                    )
+                    image, instances = render(
+                        intrinsics, cam_r, cam_t, state.boxes, scene.terrain
+                    )
+                    buf = io.BytesIO()
+                    Image.fromarray(image).save(buf, format="JPEG", quality=85)
+                    w.write_message(
+                        topic=f"/camera/{cam_name}/image",
+                        message=CompressedImage(
+                            timestamp=_ts(ns), frame_id=f"camera_{cam_name}",
+                            format="jpeg", data=buf.getvalue(),
+                        ),
+                        log_time=ns, publish_time=ns,
+                    )
+                    bump(f"/camera/{cam_name}/image")
 
-                w.write_message(
-                    topic="/camera/front/calibration",
-                    message=CameraCalibration(
-                        timestamp=_ts(ns), frame_id="camera",
-                        width=intrinsics.width, height=intrinsics.height,
-                        distortion_model="",
-                        K=[intrinsics.fx, 0.0, intrinsics.cx,
-                           0.0, intrinsics.fy, intrinsics.cy,
-                           0.0, 0.0, 1.0],
-                        P=[intrinsics.fx, 0.0, intrinsics.cx, 0.0,
-                           0.0, intrinsics.fy, intrinsics.cy, 0.0,
-                           0.0, 0.0, 1.0, 0.0],
-                    ),
-                    log_time=ns, publish_time=ns,
-                )
-                bump("/camera/front/calibration")
+                    w.write_message(
+                        topic=f"/camera/{cam_name}/calibration",
+                        message=CameraCalibration(
+                            timestamp=_ts(ns), frame_id=f"camera_{cam_name}",
+                            width=intrinsics.width, height=intrinsics.height,
+                            distortion_model="",
+                            K=[intrinsics.fx, 0.0, intrinsics.cx,
+                               0.0, intrinsics.fy, intrinsics.cy,
+                               0.0, 0.0, 1.0],
+                            P=[intrinsics.fx, 0.0, intrinsics.cx, 0.0,
+                               0.0, intrinsics.fy, intrinsics.cy, 0.0,
+                               0.0, 0.0, 1.0, 0.0],
+                        ),
+                        log_time=ns, publish_time=ns,
+                    )
+                    bump(f"/camera/{cam_name}/calibration")
 
-                # Held out: per-pixel instance ids, free from the raycaster.
-                mask = io.BytesIO()
-                Image.fromarray(instances).save(mask, format="PNG", optimize=True)
-                w.write_message(
-                    topic="/ground_truth/camera_instances",
-                    message=CompressedImage(
-                        timestamp=_ts(ns), frame_id="camera", format="png",
-                        data=mask.getvalue(),
-                    ),
-                    log_time=ns, publish_time=ns,
-                )
-                bump("/ground_truth/camera_instances")
+                    qx, qy, qz, qw = quat_from_matrix(cam_r)
+                    w.write_message(
+                        topic="/tf",
+                        message=FrameTransform(
+                            timestamp=_ts(ns), parent_frame_id="map",
+                            child_frame_id=f"camera_{cam_name}",
+                            translation=Vector3(x=cam_t[0], y=cam_t[1], z=cam_t[2]),
+                            rotation=Quaternion(x=qx, y=qy, z=qz, w=qw),
+                        ),
+                        log_time=ns, publish_time=ns,
+                    )
+                    bump("/tf")
+
+                    mask = io.BytesIO()
+                    Image.fromarray(instances).save(mask, format="PNG", optimize=True)
+                    w.write_message(
+                        topic=f"/ground_truth/camera_instances/{cam_name}",
+                        message=CompressedImage(
+                            timestamp=_ts(ns), frame_id=f"camera_{cam_name}",
+                            format="png", data=mask.getvalue(),
+                        ),
+                        log_time=ns, publish_time=ns,
+                    )
+                    bump(f"/ground_truth/camera_instances/{cam_name}")
 
             if i % truth_every == 0 and points.shape[0]:
                 instance = np.where(source < 0, 0, source + 1)

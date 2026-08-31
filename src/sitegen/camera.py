@@ -142,7 +142,25 @@ def render(
     return image.reshape(*shape, 3), instances.reshape(*shape)
 
 
-def camera_pose(house_r: Array, house_t: Array, offset: Array) -> tuple[Array, Array]:
-    """Forward-looking camera on the cab: +z forward, +x right, +y down."""
+#: A surround-view rig: four cameras at the corners and sides of the house,
+#: panned outward. Real machines mount them this way for exactly the reason the
+#: measurement below shows -- a centre-forward camera spends a quarter of its
+#: frame looking at its own boom.
+#:
+#: (name, offset in the house frame, pan about house z in degrees)
+SURROUND_RIG: list[tuple[str, tuple[float, float, float], float]] = [
+    ("front_left", (1.3, 1.15, 2.5), 35.0),
+    ("front_right", (1.3, -1.15, 2.5), -35.0),
+    ("left", (-0.3, 1.35, 2.5), 90.0),
+    ("right", (-0.3, -1.35, 2.5), -90.0),
+]
+
+
+def camera_pose(
+    house_r: Array, house_t: Array, offset: Array, pan_deg: float = 0.0
+) -> tuple[Array, Array]:
+    """Camera on the cab: +z forward, +x right, +y down, panned about house z."""
     optical = np.array([[0.0, -1.0, 0.0], [0.0, 0.0, -1.0], [1.0, 0.0, 0.0]]).T
-    return house_r @ optical, house_r @ offset + house_t
+    a = np.radians(pan_deg)
+    pan = np.array([[np.cos(a), -np.sin(a), 0.0], [np.sin(a), np.cos(a), 0.0], [0.0, 0.0, 1.0]])
+    return house_r @ pan @ optical, house_r @ offset + house_t
