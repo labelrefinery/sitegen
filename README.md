@@ -21,8 +21,11 @@ One file, two groups of topics, and a rule.
 | `/tf` | `foxglove.FrameTransform` | `map` → `lidar` |
 | `/gnss` | `foxglove.LocationFix` | ego global pose |
 | `/terrain/heightmap` | `foxglove.PointCloud` | published once, at t₀ |
+| `/camera/front/image` | `foxglove.CompressedImage` | optional, `--camera-hz` |
+| `/camera/front/calibration` | `foxglove.CameraCalibration` | pinhole K and P |
 | `/ground_truth/actors` | `foxglove.SceneUpdate` | **held out** — per-part cuboids |
 | `/ground_truth/points` | `foxglove.PointCloud` | **held out** — per-point instance id |
+| `/ground_truth/camera_instances` | `foxglove.CompressedImage` | **held out** — per-pixel instance id |
 
 **A labeler reads the first group. Only the scorer reads `/ground_truth/*`.**
 Both live in one file rather than two so the truth cannot drift from the data
@@ -166,9 +169,38 @@ pc.ParseFromString(raw)
 The number that makes the case is one curve: label quality against round, with
 the oracle as the ceiling.
 
+## The camera, and what it is not
+
+`--camera-hz 2` renders a forward-looking camera on the cab mast, using the
+same raycaster as the LiDAR — so a return in the cloud and a pixel in the image
+describe the same surface, because the same ray produced both. Per-pixel
+instance ids come out free, since the raycaster already knows which box each
+ray hit: segmentation ground truth nobody had to draw.
+
+**It is shaded geometry, not photorealism, and that limit is measured rather
+than assumed.** Grounding DINO on a render against the same model on a real
+construction photograph, same prompt (`"excavator . haul truck . worker ."`):
+
+| input | detections |
+| --- | --- |
+| real photograph | `excavator` **0.858**, `haul truck` **0.771** |
+| sitegen render | `excavator haul` 0.453, on the ego's own boom; truck and worker missed |
+
+The model, weights and prompt are fine — the control proves it. Untextured
+cuboids simply do not carry the texture and context an open-vocabulary detector
+keys on. So the camera is here to build and test the *geometric* half of a
+naming pipeline — projection, calibration, image-to-instance association — and
+class naming should be validated against real imagery. Raycasting the
+[3D-ConHE](https://www.mdpi.com/2076-3417/14/9/3599) meshes would narrow the
+gap; it would not close it.
+
+One finding worth carrying into any camera pipeline: the ego's own boom
+occupied **23% of the frame** and captured the only detection. The same
+proprioception self-mask that cleans the LiDAR should crop the ego out of the
+image before a detector ever sees it.
+
 ## Not yet
 
-- Cameras. The schemas exist (`RawImage`, `CameraCalibration`); no renderer.
 - Mesh geometry. Actors are oriented boxes; raycasting the 3D-ConHE meshes
   would make the clouds look like real equipment and make size estimation
   honest.

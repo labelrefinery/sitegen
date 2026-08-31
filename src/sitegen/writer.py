@@ -19,10 +19,14 @@ the data it describes if they were written by the same pass.
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
+from foxglove_schemas_protobuf.CameraCalibration_pb2 import CameraCalibration
 from foxglove_schemas_protobuf.Color_pb2 import Color
+from foxglove_schemas_protobuf.CompressedImage_pb2 import CompressedImage
 from foxglove_schemas_protobuf.CubePrimitive_pb2 import CubePrimitive
 from foxglove_schemas_protobuf.FrameTransform_pb2 import FrameTransform
 from foxglove_schemas_protobuf.JointState_pb2 import JointState
@@ -39,12 +43,16 @@ from google.protobuf.duration_pb2 import Duration
 from google.protobuf.timestamp_pb2 import Timestamp
 from mcap_protobuf.writer import Writer
 
-from .actors import sensor_pose
+from .actors import HOUSE, SLEW_HEIGHT, sensor_pose
+from .camera import CameraIntrinsics, camera_pose, render
 from .geometry import Array, Box, quat_from_matrix
 from .scene import Scene
 from .sensors import Lidar, sweep
 
 SITE_LAT, SITE_LON = 37.4419, -122.1430
+
+#: Camera mast offset in the house frame, forward of and above the cab.
+CAMERA_OFFSET = np.array([1.6, 0.0, HOUSE[2] + 0.4])
 
 CLASS_COLORS: dict[str, tuple[float, float, float]] = {
     "excavator": (0.98, 0.75, 0.10),
@@ -133,6 +141,10 @@ def generate(
     truth_points_hz: float = 2.0,
     difficulty: float = 1.0,
     azimuth_steps: int = 450,
+    camera_hz: float = 0.0,
+    camera_width: int = 960,
+    camera_height: int = 540,
+    camera_fov_deg: float = 78.0,
 ) -> dict[str, int]:
     """Write one scene. Returns per-topic message counts."""
     scene = Scene(seed=seed, duration_s=duration_s, difficulty=difficulty)
@@ -149,6 +161,8 @@ def generate(
 
     step_ns = int(1e9 / rate_hz)
     truth_every = max(1, int(round(rate_hz / truth_points_hz)))
+    camera_every = max(1, int(round(rate_hz / camera_hz))) if camera_hz > 0 else 0
+    intrinsics = CameraIntrinsics.from_fov(camera_width, camera_height, camera_fov_deg)
     frames = int(duration_s * rate_hz)
     base_ns = 1_700_000_000_000_000_000
 
@@ -262,6 +276,55 @@ def generate(
                 publish_time=ns,
             )
             bump("/ground_truth/actors")
+
+            if camera_every and i % camera_every == 0:
+                house_r = sensor_r
+                house_t = np.array([state.ego.x, state.ego.y, SLEW_HEIGHT])
+                cam_r, cam_t = camera_pose(house_r, house_t, CAMERA_OFFSET)
+                image, instances = render(
+                    intrinsics, cam_r, cam_t, state.boxes, scene.terrain
+                )
+                buf = io.BytesIO()
+                Image.fromarray(image).save(buf, format="JPEG", quality=85)
+                w.write_message(
+                    topic="/camera/front/image",
+                    message=CompressedImage(
+                        timestamp=_ts(ns), frame_id="camera", format="jpeg",
+                        data=buf.getvalue(),
+                    ),
+                    log_time=ns, publish_time=ns,
+                )
+                bump("/camera/front/image")
+
+                w.write_message(
+                    topic="/camera/front/calibration",
+                    message=CameraCalibration(
+                        timestamp=_ts(ns), frame_id="camera",
+                        width=intrinsics.width, height=intrinsics.height,
+                        distortion_model="",
+                        K=[intrinsics.fx, 0.0, intrinsics.cx,
+                           0.0, intrinsics.fy, intrinsics.cy,
+                           0.0, 0.0, 1.0],
+                        P=[intrinsics.fx, 0.0, intrinsics.cx, 0.0,
+                           0.0, intrinsics.fy, intrinsics.cy, 0.0,
+                           0.0, 0.0, 1.0, 0.0],
+                    ),
+                    log_time=ns, publish_time=ns,
+                )
+                bump("/camera/front/calibration")
+
+                # Held out: per-pixel instance ids, free from the raycaster.
+                mask = io.BytesIO()
+                Image.fromarray(instances).save(mask, format="PNG", optimize=True)
+                w.write_message(
+                    topic="/ground_truth/camera_instances",
+                    message=CompressedImage(
+                        timestamp=_ts(ns), frame_id="camera", format="png",
+                        data=mask.getvalue(),
+                    ),
+                    log_time=ns, publish_time=ns,
+                )
+                bump("/ground_truth/camera_instances")
 
             if i % truth_every == 0 and points.shape[0]:
                 instance = np.where(source < 0, 0, source + 1)

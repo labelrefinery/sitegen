@@ -9,6 +9,7 @@ dependencies = [
     "mcap-protobuf-support>=0.5.4",
     "foxglove-schemas-protobuf>=0.4.0",
     "numpy>=2.5.2",
+    "pillow>=12.3.0",
 ]
 
 [project.scripts]

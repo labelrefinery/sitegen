@@ -19,6 +19,9 @@ def _cmd_generate(args: argparse.Namespace) -> None:
         truth_points_hz=args.truth_points_hz,
         difficulty=args.difficulty,
         azimuth_steps=args.azimuth_steps,
+        camera_hz=args.camera_hz,
+        camera_width=args.camera_width,
+        camera_height=args.camera_height,
     )
     print(f"wrote {args.out} ({args.out.stat().st_size / 1e6:.1f} MB)")
     for topic, n in sorted(counts.items()):
@@ -101,6 +104,15 @@ def main() -> None:
         help="scales range noise, dropout and dust severity",
     )
     g.add_argument("--azimuth-steps", type=int, default=450)
+    g.add_argument(
+        "--camera-hz",
+        type=float,
+        default=0.0,
+        help="render a forward camera at this rate (0 = off). Shaded geometry, "
+        "not photorealism -- see the README before pointing a VLM at it",
+    )
+    g.add_argument("--camera-width", type=int, default=960)
+    g.add_argument("--camera-height", type=int, default=540)
     g.set_defaults(func=_cmd_generate)
 
     t = sub.add_parser("truth", help="export ground truth as a tracker CSV")
