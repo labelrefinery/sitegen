@@ -1,0 +1,33 @@
+Assets used by the worker probe (tools/probe/render.py). None are committed --
+the script downloads or expects them in an --assets directory outside the repo.
+
+Human
+  "Worker", by Quaternius
+  CC0 1.0 (public domain dedication)
+  https://poly.pizza/m/Yg2bQZO6Hj
+  https://static.poly.pizza/3a5f3056-ffe6-42eb-bd52-122afcbd22b2.glb
+  Rigged, skinned, 24 baked animations, hard hat and hi-vis vest as separate
+  materials. Stylised low-poly rather than photoreal, and flat-coloured rather
+  than image-textured -- worth stating plainly, because it makes the result a
+  lower bound on what a scanned human would score.
+
+Environment lighting
+  "Construction Yard" HDRI, 2K HDR, by Sergej Majboroda (Poly Haven)
+  CC0 1.0
+  https://polyhaven.com/a/construction_yard
+  https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/construction_yard_2k.hdr
+
+Ground material
+  "Gravel", 2K JPG (diffuse, roughness, OpenGL normal), by Dimitrios Savva
+  (Poly Haven)
+  CC0 1.0
+  https://polyhaven.com/a/gravel
+  https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/gravel/gravel_diff_2k.jpg
+  https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/gravel/gravel_rough_2k.jpg
+  https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/gravel/gravel_nor_gl_2k.jpg
+
+Renderer
+  Blender 5.2.1 LTS, Cycles, via the official `bpy` PyPI module (GPL-3.0).
+
+Detector
+  IDEA-Research/grounding-dino-tiny, Apache 2.0, run through `transformers`.

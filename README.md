@@ -221,11 +221,22 @@ case without a model at all. Raycasting the
 [3D-ConHE](https://www.mdpi.com/2076-3417/14/9/3599) meshes would narrow the
 gap; only real imagery closes it.
 
+That last claim is now measured rather than assumed.
+[docs/PROBE-WORKER.md](docs/PROBE-WORKER.md) re-renders these same ten views in
+Cycles under an outdoor HDRI with exactly one thing changed — the worker
+cuboid replaced by a rigged human in a hi-vis vest and hard hat. The worker
+goes from never detected to **11 of 11 sightings, mean 0.544**, labelled
+`worker person` every time. The truck, left as the same pair of boxes, does not
+move (0.469 to 0.463), and keeping the cuboid under the identical lighting and
+ground still detects nothing at all. **What the detector cannot see is the box,
+not the scene.**
+
 ## Not yet
 
 - Mesh geometry. Actors are oriented boxes; raycasting the 3D-ConHE meshes
   would make the clouds look like real equipment and make size estimation
-  honest.
+  honest. The worker probe puts a number on what it would buy on the camera
+  side.
 - Terrain that changes. The stockpiles are static, so a cut/fill or
   volume-tracking pipeline has nothing to measure yet.
 

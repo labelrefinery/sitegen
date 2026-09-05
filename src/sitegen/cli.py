@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from . import export, overlay
+from . import export, overlay, views
 from . import score as scoring
 from .writer import generate
 
@@ -51,6 +51,20 @@ def _cmd_joints(args: argparse.Namespace) -> None:
 def _cmd_sweeps(args: argparse.Namespace) -> None:
     n = export.write_sweeps(args.mcap, args.out)
     print(f"wrote {n} sweeps to {args.out} (float32 x,y,z,intensity; see index.csv)")
+
+
+def _cmd_cameras(args: argparse.Namespace) -> None:
+    every = views.read_views(args.mcap)
+    chosen = views.select(every, count=args.views)
+    path = views.write_views(chosen, args.out)
+    print(f"wrote {path}: {len(chosen)} of {len(every)} views")
+    for v in chosen:
+        seen = ", ".join(
+            f"{instance} {n}px"
+            for cls in ("worker", "haul_truck")
+            for instance, n in v.instances(cls)
+        )
+        print(f"  {v.camera:12s} t={v.t:5.1f}s  {seen or 'nothing'}")
 
 
 def _cmd_overlay(args: argparse.Namespace) -> None:
@@ -146,6 +160,21 @@ def main() -> None:
     s.add_argument("mcap", type=Path)
     s.add_argument("--out", type=Path, required=True)
     s.set_defaults(func=_cmd_sweeps)
+
+    cam = sub.add_parser(
+        "cameras",
+        help="export camera views with intrinsics, extrinsics and visible actors",
+    )
+    cam.add_argument("mcap", type=Path)
+    cam.add_argument("--out", type=Path, required=True, help="directory to write")
+    cam.add_argument(
+        "--views",
+        type=int,
+        default=10,
+        help="how many views to select: every one with a visible worker first, "
+        "then the clearest views of the truck as a control",
+    )
+    cam.set_defaults(func=_cmd_cameras)
 
     o = sub.add_parser(
         "overlay",
