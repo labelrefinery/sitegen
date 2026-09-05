@@ -37,6 +37,7 @@ def _cmd_generate(args: argparse.Namespace) -> None:
         camera_width=args.camera_width,
         camera_height=args.camera_height,
         mesh_actors=args.actors == "meshes",
+        deforming=args.terrain == "deforming",
         camera_renderer=args.camera_renderer,
         camera_assets=args.camera_assets,
         camera_samples=args.camera_samples,
@@ -64,6 +65,13 @@ def _cmd_tf(args: argparse.Namespace) -> None:
 
 def _cmd_joints(args: argparse.Namespace) -> None:
     print(f"wrote {args.out}: {export.write_joints_csv(args.mcap, args.out)} rows")
+
+
+def _cmd_volumes(args: argparse.Namespace) -> None:
+    rows = export.write_volumes_csv(args.mcap, args.out)
+    if not rows:
+        print(f"{args.mcap} has no /ground_truth/volumes -- static terrain?")
+    print(f"wrote {args.out}: {rows} rows")
 
 
 def _cmd_sweeps(args: argparse.Namespace) -> None:
@@ -172,6 +180,16 @@ def main() -> None:
         "measurements taken before the meshes existed stay reproducible",
     )
     g.add_argument(
+        "--terrain",
+        choices=("deforming", "static"),
+        default="deforming",
+        help="deforming is an elevation grid the bucket cuts into and the "
+        "hauler carries away, with the material balance held out on "
+        "/ground_truth/volumes; static is the analytic plane and cones the "
+        "scene had before that, and with --actors boxes --sensor legacy "
+        "reproduces the old recordings byte for byte",
+    )
+    g.add_argument(
         "--camera-hz",
         type=float,
         default=0.0,
@@ -233,6 +251,13 @@ def main() -> None:
     s.add_argument("mcap", type=Path)
     s.add_argument("--out", type=Path, required=True)
     s.set_defaults(func=_cmd_sweeps)
+
+    v = sub.add_parser(
+        "volumes", help="export the held-out material balance as a CSV timeline"
+    )
+    v.add_argument("mcap", type=Path)
+    v.add_argument("--out", type=Path, required=True)
+    v.set_defaults(func=_cmd_volumes)
 
     cam = sub.add_parser(
         "cameras",

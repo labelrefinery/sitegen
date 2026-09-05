@@ -45,11 +45,18 @@ noticed: the haul truck's cuboids started at z = 0.6 m and z = 1.0 m, because
 the box model had no wheels. An eight-tonne machine was floating, and the
 ground truth agreed with it.
 
-**Terrain stayed analytic.** A plane and two cones at the angle of repose are
-exact and free where a heightmap mesh would be neither, and Blender builds the
-identical plane and 128-gon cones, so the two sensors agree about the ground.
-Where they can disagree is a cone's silhouette, and there it does not matter:
-ground, pile and sky all carry instance id 0.
+**Terrain stayed analytic** until it had to change. A plane and two cones at
+the angle of repose are exact and free where a mesh is neither, and that is
+still what `--terrain static` gives both sensors -- Blender building the
+identical plane and 128-gon cones. It cannot cut, though, so the default is now
+an elevation grid: 80,000 triangles under a BVH of their own, rebuilt only when
+the ground actually moves, and handed to Blender as the same vertex array
+rather than as instructions for rebuilding something similar. The property this
+whole document is about did not change; it now covers the ground too.
+[docs/TERRAIN.md](TERRAIN.md) is the model and the measurements. Where the two
+can still disagree is a silhouette, and there it does not matter: ground, pile,
+cut and sky all carry instance id 0, which is why the same-surface agreement is
+**0.9980 either way, identical to four figures**.
 
 **Nothing in the sensor model changed** when the actors became meshes. 1/r²
 density, range noise, quadratic dropout, dust, ego self-returns — all
@@ -177,6 +184,7 @@ uv run sitegen generate --out site.mcap --seed 1 --duration 60 \
 | --- | --- |
 | LiDAR, boxes, 600 sweeps | 4.97 s |
 | LiDAR, meshes, 600 sweeps | 9.27 s |
+| the same, with `--terrain deforming` | +2.3 s (1.28x end to end) |
 | camera, 4 × 2 Hz × 60 s = 480 Cycles frames | 20 min (2.5 s per frame, image + id pass) |
 
 Ray–mesh costs 1.9× ray–box for the whole scene, which is the entire price of
@@ -215,9 +223,12 @@ about 5 ms.
   unrelated integers, and at every silhouette it would name a third actor. One
   sample at the pixel centre is also exactly where `ray_directions` puts its
   ray, which is what makes the two sensors comparable pixel for pixel.
-- **Terrain is not a heightmap mesh**, for the reason above: analytic on one
-  side and the identical primitives on the other is both cheaper and more
-  exactly agreed.
+- **Terrain is not a heightmap mesh** -- it was, for the reason above, and it
+  is one now because the ground had to be able to change. The cost was measured
+  rather than feared: 39 ms per BVH rebuild at one rebuild a second, 2.2 ms a
+  sweep to query, and no movement at all in the same-surface number. What the
+  original reasoning got right is that the *analytic* version is cheaper and
+  more exactly agreed, and that is why `--terrain static` still exists.
 - **The HDRI changed** from the probe's `construction_yard` to a pure-sky one.
   The probe's own write-up flagged the backdrop's real people and vehicles as
   generating their own detections above the horizon; a clean horizon isolates

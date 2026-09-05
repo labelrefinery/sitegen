@@ -96,6 +96,7 @@ PALETTE: dict[str, tuple[tuple[float, float, float], float, float]] = {
     "bed": ((0.20, 0.20, 0.21), 0.55, 0.8),
     "rubber": ((0.02, 0.02, 0.02), 0.85, 0.0),
     "glass": ((0.04, 0.06, 0.08), 0.08, 0.0),
+    "soil": ((0.14, 0.10, 0.07), 0.95, 0.0),
     "timber": ((0.36, 0.24, 0.12), 0.85, 0.0),
     "marker": ((0.92, 0.30, 0.05), 0.6, 0.0),
     # The worker's slots, as the GLB named them. Hi-vis is saturated and
@@ -135,6 +136,10 @@ class Shot:
     rotation: list[list[float]]
     translation: list[float]
     objects: list[Placement] = field(default_factory=list)
+    terrain: int = 0
+    """Which committed ground snapshot was current. Only the z coordinates of
+    one mesh differ between snapshots, so Blender rewrites those and keeps the
+    datablock rather than rebuilding 80,000 triangles per frame."""
 
 
 def placements(parts: list, ids: list[int]) -> list[Placement]:
@@ -155,16 +160,20 @@ def write_job(
     *,
     intrinsics: Any,
     assets: Path,
-    stockpiles: list[tuple[float, float, float]],
+    terrain: Any,
+    surfaces: list[Any] | None = None,
     samples: int = 48,
     hdri: str = DEFAULT_HDRI,
     ground_extent: float = 400.0,
 ) -> Path:
-    """Serialise a render job and the meshes it refers to.
+    """Serialise a render job and the geometry it refers to.
 
-    The meshes go over as PLY, the same format the baked worker already ships
-    in, so the thing Blender loads is a file anyone can open and check against
-    what the LiDAR hit.
+    The actor meshes go over as PLY, the same format the baked worker already
+    ships in, so the thing Blender loads is a file anyone can open and check
+    against what the LiDAR hit. The ground goes over the same way in spirit and
+    a different way in practice: one `.npy` holding every committed snapshot's
+    elevations, because the grid's topology never changes and only its z does,
+    and 15 snapshots of 40,401 nodes is 2.4 MB where 15 PLYs would be 20.
     """
     from .meshes import mesh as mesh_for, write_ply
 
@@ -172,6 +181,29 @@ def write_job(
     used = sorted({p.mesh for shot in shots for p in shot.objects})
     for name in used:
         write_ply(mesh_for(name), directory / "meshes" / f"{name}.ply")
+
+    if surfaces:
+        grid = surfaces[0].field
+        nx, ny = grid.shape
+        np.save(
+            directory / "terrain.npy",
+            np.stack([s.field.z for s in surfaces]).astype(np.float32),
+        )
+        ground = {
+            "kind": "heightfield",
+            "x0": grid.x0,
+            "y0": grid.y0,
+            "pitch": grid.pitch,
+            "nx": nx,
+            "ny": ny,
+            "extent": surfaces[0].extent,
+            "heights": "terrain.npy",
+        }
+    else:
+        ground = {
+            "kind": "analytic",
+            "stockpiles": [[p.x, p.y, p.height] for p in terrain.stockpiles],
+        }
 
     job = {
         "width": intrinsics.width,
@@ -184,7 +216,7 @@ def write_job(
         "assets": str(assets),
         "hdri": hdri,
         "ground_extent": ground_extent,
-        "stockpiles": [list(p) for p in stockpiles],
+        "ground": ground,
         "meshes": used,
         "shots": [
             {
@@ -192,6 +224,7 @@ def write_job(
                 "rotation": shot.rotation,
                 "translation": shot.translation,
                 "objects": [vars(p) for p in shot.objects],
+                "terrain": shot.terrain,
             }
             for shot in shots
         ],
@@ -294,21 +327,86 @@ def world_hdri(bpy: Any, path: Path, strength: float = 1.0, rotation_deg: float 
     links.new(bg.outputs["Background"], out.inputs["Surface"])
 
 
+def _surround(extent: float, size: float) -> tuple[list, list]:
+    """The far field: a plane with a rectangular hole where the patch goes.
+
+    A plane *with a hole* rather than a plane under the patch, because a cut
+    goes below z = 0 and a full plane would floor it over -- and because two
+    coincident surfaces at z = 0 is a z-fighting stripe across half the image.
+    The raycaster does the same thing arithmetically: it takes the analytic
+    plane's hit and throws it away when it lands inside the patch.
+    """
+    s, e = size / 2.0, extent
+    quads = [
+        (-s, -s, -e, s),
+        (e, -s, s, s),
+        (-e, -s, e, -e),
+        (-e, e, e, s),
+    ]
+    verts: list[tuple[float, float, float]] = []
+    faces: list[tuple[int, int, int, int]] = []
+    for x0, y0, x1, y1 in quads:
+        n = len(verts)
+        verts += [(x0, y0, 0.0), (x1, y0, 0.0), (x1, y1, 0.0), (x0, y1, 0.0)]
+        faces.append((n, n + 1, n + 2, n + 3))
+    return verts, faces
+
+
+def _patch_mesh(bpy: Any, job: dict) -> Any:
+    """One datablock for the deforming ground, at its t0 elevations."""
+    g = job["ground"]
+    nx, ny, pitch = g["nx"], g["ny"], g["pitch"]
+    heights = np.load(Path(job["job_dir"]) / g["heights"])
+    xs = g["x0"] + pitch * np.arange(nx)
+    ys = g["y0"] + pitch * np.arange(ny)
+    gx, gy = np.meshgrid(xs, ys, indexing="ij")
+    verts = np.stack([gx, gy, heights[0]], axis=-1).reshape(-1, 3)
+    ii, jj = np.meshgrid(np.arange(nx - 1), np.arange(ny - 1), indexing="ij")
+    a = (ii * ny + jj).ravel()
+    b = ((ii + 1) * ny + jj).ravel()
+    c = ((ii + 1) * ny + jj + 1).ravel()
+    d = (ii * ny + jj + 1).ravel()
+    tris = np.concatenate(
+        [np.stack([a, b, c], axis=-1), np.stack([a, c, d], axis=-1)]
+    )
+    data = bpy.data.meshes.new("terrain")
+    data.from_pydata(verts.tolist(), [], tris.astype(int).tolist())
+    data.update()
+    return data, heights
+
+
 def ground(
     bpy: Any,
     assets: Path,
-    stockpiles: list[tuple[float, float, float]],
+    job: dict,
     size: float = 400.0,
     tile_m: float = 2.0,
-) -> list[Any]:
-    """sitegen's terrain: a plane at z = 0 and cones at the angle of repose.
+) -> tuple[list[Any], Any, Any]:
+    """sitegen's terrain, whichever kind this scene has.
 
-    The same two primitives the LiDAR intersects analytically, so the ground
-    the two sensors see is the same ground. Returns the objects, because the
-    id pass has to silence them along with everything else.
+    Static: the plane at z = 0 and cones at the angle of repose, which is
+    exactly what the analytic raycaster intersects. Deforming: the same
+    elevation grid the LiDAR's BVH was built over, vertex for vertex, plus the
+    plane around it -- so "one definition of the geometry, two sensors" now
+    covers the ground as well as the actors.
+
+    Returns the objects (the id pass has to silence them along with everything
+    else), the deforming patch's mesh datablock, and the stack of committed
+    elevations it will be re-posed from.
     """
-    bpy.ops.mesh.primitive_plane_add(size=size, location=(0.0, 0.0, 0.0))
-    plane = bpy.context.object
+    spec = job.get("ground", {"kind": "analytic", "stockpiles": []})
+    deforming = spec["kind"] == "heightfield"
+
+    if deforming:
+        verts, faces = _surround(spec["extent"], size)
+        far = bpy.data.meshes.new("surround")
+        far.from_pydata(verts, [], faces)
+        far.update()
+        plane = bpy.data.objects.new("surround", far)
+        bpy.context.scene.collection.objects.link(plane)
+    else:
+        bpy.ops.mesh.primitive_plane_add(size=size, location=(0.0, 0.0, 0.0))
+        plane = bpy.context.object
 
     material = bpy.data.materials.new("gravel")
     material.use_nodes = True
@@ -338,12 +436,23 @@ def ground(
     plane.data.materials.append(material)
 
     made = [plane]
+    if deforming:
+        # One ground material now, because the pile and the ground it stands on
+        # are one surface: material dumped on a stockpile and material scraped
+        # off the floor are the same soil, and the grid cannot tell them apart.
+        data, heights = _patch_mesh(bpy, job)
+        data.materials.append(material)
+        patch = bpy.data.objects.new("terrain", data)
+        bpy.context.scene.collection.objects.link(patch)
+        made.append(patch)
+        return made, data, heights
+
     dirt = bpy.data.materials.new("pile")
     dirt.use_nodes = True
     pile_bsdf = dirt.node_tree.nodes["Principled BSDF"]
     pile_bsdf.inputs["Base Color"].default_value = (0.14, 0.10, 0.07, 1.0)
     pile_bsdf.inputs["Roughness"].default_value = 0.95
-    for x, y, height in stockpiles:
+    for x, y, height in spec["stockpiles"]:
         bpy.ops.mesh.primitive_cone_add(
             radius1=height / math.tan(math.radians(REPOSE_DEG)),
             depth=height,
@@ -352,7 +461,7 @@ def ground(
         )
         bpy.context.object.data.materials.append(dirt)
         made.append(bpy.context.object)
-    return made
+    return made, None, None
 
 
 def camera(
@@ -464,6 +573,7 @@ def _worker(job_path: Path, out: Path) -> None:
     from .meshes import read_ply
 
     job = json.loads(job_path.read_text())
+    job["job_dir"] = str(job_path.parent)
     assets = Path(job["assets"])
     library = {
         name: read_ply(job_path.parent / "meshes" / f"{name}.ply")
@@ -473,9 +583,10 @@ def _worker(job_path: Path, out: Path) -> None:
     bpy.ops.wm.read_factory_settings(use_empty=True)
     engine(bpy, addon_utils, job["samples"])
     world_hdri(bpy, assets / job["hdri"])
-    terrain = ground(
-        bpy, assets, [tuple(p) for p in job["stockpiles"]], size=job["ground_extent"]
+    terrain, patch, elevations = ground(
+        bpy, assets, job, size=job["ground_extent"]
     )
+    posed_terrain = 0
 
     scene = bpy.context.scene
 
@@ -523,6 +634,17 @@ def _worker(job_path: Path, out: Path) -> None:
         for name, objects in pool.items():
             for obj in objects[counts.get(name, 0) :]:
                 obj.hide_render = True
+
+        if patch is not None and shot.get("terrain", 0) != posed_terrain:
+            posed_terrain = shot["terrain"]
+            # Same datablock, new z. Only the elevations differ between
+            # snapshots, so re-posing is one array write rather than 80,000
+            # triangles of mesh construction per changed second.
+            flat = np.empty(len(patch.vertices) * 3, dtype=np.float32)
+            patch.vertices.foreach_get("co", flat)
+            flat[2::3] = elevations[posed_terrain].reshape(-1)
+            patch.vertices.foreach_set("co", flat)
+            patch.update()
 
         place(bpy, mathutils, cam, shot["rotation"], shot["translation"], optical=True)
         scene.frame_current = index

@@ -20,12 +20,13 @@ One file, two groups of topics, and a rule.
 | `/ego/joint_states` | `foxglove.JointStates` | swing, boom, stick, bucket |
 | `/tf` | `foxglove.FrameTransform` | `map` → `lidar` |
 | `/gnss` | `foxglove.LocationFix` | ego global pose |
-| `/terrain/heightmap` | `foxglove.PointCloud` | published once, at t₀ |
+| `/terrain/heightmap` | `foxglove.PointCloud` | the ground, at t₀ and whenever it changes |
 | `/camera/<name>/image` | `foxglove.CompressedImage` | optional, `--camera-hz`; four cameras |
 | `/camera/<name>/calibration` | `foxglove.CameraCalibration` | pinhole K and P |
 | `/ground_truth/actors` | `foxglove.SceneUpdate` | **held out** — per-part cuboids |
 | `/ground_truth/points` | `foxglove.PointCloud` | **held out** — per-point instance id |
 | `/ground_truth/camera_instances/<name>` | `foxglove.CompressedImage` | **held out** — per-pixel instance id |
+| `/ground_truth/volumes` | `foxglove.JointStates` | **held out** — cut, bucket, bed, hauled, per-pile |
 
 **A labeler reads the first group. Only the scorer reads `/ground_truth/*`.**
 Both live in one file rather than two so the truth cannot drift from the data
@@ -33,16 +34,22 @@ it describes — the same pass wrote them.
 
 ## The scene
 
-A 20-tonne excavator running a dig-swing-dump-return cycle (15 s, five or six
-passes to fill a bed), loading an articulated hauler that backs in, is loaded,
-and hauls off before a second truck takes its place. Part-way through, the
-machine walks 6.5 m along the trench line to a second dig station -- house
-squared up over the tracks, boom tucked -- and the hauler repositions with it.
-A spotter holds station; a second worker crosses the swing radius around
-t=25 s. Two stockpiles sit at the angle of repose, a row of grade stakes runs
-along the north edge, and dust kicks up when the loaded truck pulls away.
+A 20-tonne excavator running a dig-swing-dump-return cycle (15 s), loading an
+articulated hauler that backs in, is loaded, and hauls off before a second
+truck takes its place. Part-way through, the machine walks 6.5 m along the
+trench line to a second dig station -- house squared up over the tracks, boom
+tucked -- and the hauler repositions with it. A spotter holds station; a second
+worker crosses the swing radius around t=25 s. Two stockpiles sit at the angle
+of repose, a row of grade stakes runs along the north edge, and dust kicks up
+when the loaded truck pulls away.
 
-Five things are deliberate:
+The ground is a heightfield the bucket cuts into. Each pass takes soil out of
+the cut, the wall slumps back to the angle of repose, the material heaps in the
+hauler's body, and it leaves the site when the hauler does -- so a 60 s
+recording ends with two bowls in ground that started flat, and 2.1 m³ of
+material to account for.
+
+Six things are deliberate:
 
 **The excavator is articulated.** Base pose plus swing, boom, stick, and bucket
 — four DOF on top of the body. Every link is its own ground-truth box, so a
@@ -82,6 +89,16 @@ the returns the old worker collected were off a cuboid a person does not fill,
 and widening the elevation band to the real machine's put the other half into
 the ground.
 
+**The ground remembers.** Every other actor is a pure function of `t`. Terrain
+cannot be, because a hole is a record of what happened to it — and that is the
+point: a cut/fill pipeline has to *accumulate* rather than recognise. Soil
+comes out of the ground at the cutting edge, slumps to the angle of repose,
+heaps in the hauler's body and leaves the site with it, and the balance closes
+to 10⁻¹³ m³. So `/ground_truth/volumes` is an oracle in the same sense the
+cuboids are, and `net` — what differencing two surveys would give you — is
+deliberately not `cut`, because material that went to a stockpile is still on
+site and material that went out the gate is not.
+
 ## Use
 
 ```sh
@@ -100,13 +117,15 @@ uv run sitegen generate --out site.mcap --seed 1 --duration 60
 --density          sample (default) or real: 64 x 1440, the real rig's budget
 --sensor           calibrated (default) or legacy, the pre-GOOSE-Ex sensor
 --actors           meshes (default) or boxes, the geometry both sensors see
+--terrain          deforming (default) or static; see docs/TERRAIN.md
 --camera-hz        render the four-camera rig; see docs/RENDERING.md
 ```
 
 Roughly 1.5 MB of scene per second at defaults, so a 60 s run is ~90 MB in
-8 seconds. `--density real` is 92,160 rays a sweep instead of 14,400: **590 MB
-and 18 seconds** for the same 60 s, and the only setting that puts a worker at
-14 m within a factor of three of the real rig. Samples are published as release
+10 seconds — 8 of them with `--terrain static`, the rest being the ground.
+`--density real` is 92,160 rays a sweep instead of 14,400: **590 MB and
+25 seconds** for the same 60 s, and the only setting that puts a worker at 14 m
+within a factor of three of the real rig. Samples are published as release
 assets rather than committed — pin one by URL and checksum so two pipelines
 under comparison consume byte-identical input.
 
@@ -123,7 +142,9 @@ and no custom panel to write.
      hi-vis PPE returns nearly four times what soil does, which is what it does
      on a real site
    - `/ground_truth/actors` — the oracle cuboids, coloured by class
-   - `/terrain/heightmap` — the static ground and stockpiles
+   - `/terrain/heightmap` — the ground and stockpiles, republished each time
+     the bucket changes them: twelve messages in a 60 s recording, every one of
+     them inside a dig window
 4. Add a **Plot** panel on `/ego/joint_states` to watch the dig cycle —
    `swing`, `boom`, `stick` and `bucket` trace one cycle every 15 s, and the
    flat stretch at t≈26–34 s is the machine walking to its second station.
@@ -261,10 +282,30 @@ all* — there is one excavator on the site and it is the one carrying the
 cameras. Asked from a camera placed off the machine, the same weights score the
 excavator mesh **0.807** and **0.809**, against 0.858 for a real one.
 
-## Not yet
+## The ground
 
-- Terrain that changes. The stockpiles are static, so a cut/fill or
-  volume-tracking pipeline has nothing to measure yet.
+`--terrain deforming`, the default, makes the site a 0.25 m elevation grid over
+the working area, cut by the bucket's own sole and relaxed to the 34° angle of
+repose after every bite, with the removed volume conserved all the way to the
+hauler driving it off site. Both sensors see it — the LiDAR through a BVH
+rebuilt only when the ground changes, Cycles from the same vertex array — and
+`tests/test_same_surface.py` reports **0.9980**, identical to four figures with
+the terrain static, because ground, pile and cut all carry instance id 0.
+
+The material balance is held out on `/ground_truth/volumes` and exports with
+`sitegen volumes`. It costs **1.28×** the generation time: 10.4 s for a 60 s
+scene against 8.1 s, of which half a second is the earthworks pre-pass and half
+a second is twelve BVH rebuilds at 39 ms each. `--terrain static` is the
+analytic plane and cones, and with `--actors boxes --sensor legacy` still
+reproduces the pre-terrain recordings byte for byte.
+
+[docs/TERRAIN.md](docs/TERRAIN.md) is the whole of it, including the part that
+is not flattering: the scripted dig stroke works the same 1.5 m of face every
+cycle without advancing the cut, so after the first bite each pass recovers
+only what slumped back in. A 60 s recording moves 2.1 m³ rather than the six
+heaped buckets the cycle description implies, and the one near-full bucket in
+it is the first pass at the second dig station. Fixing that means changing the
+published joint trajectory, which is a scene change and not a terrain one.
 
 ## License
 

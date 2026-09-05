@@ -252,6 +252,45 @@ def write_joints_csv(path: Path, out: Path) -> int:
     return rows
 
 
+def write_volumes_csv(path: Path, out: Path) -> int:
+    """`t` and one column per channel of /ground_truth/volumes.
+
+    Held out, like the topic. This is the timeline a cut/fill or
+    progress-monitoring pipeline is scored against: it says how much material
+    left the ground, how much is standing in each stockpile, and how much has
+    already been driven off the site -- the last of which no survey of the
+    site can recover, which is exactly why it is worth publishing.
+
+    The columns are whatever the recording contains, in the order it wrote
+    them, so adding a stockpile to the scene adds a column here without
+    touching this function.
+    """
+    base_ns: int | None = None
+    rows = 0
+    names: list[str] | None = None
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "rb") as f, open(out, "w", newline="") as fo:
+        writer = csv.writer(fo)
+        for _, _, msg in make_reader(f).iter_messages(
+            topics=["/ground_truth/volumes"]
+        ):
+            if base_ns is None:
+                base_ns = msg.log_time
+            record = JointStates()
+            record.ParseFromString(msg.data)
+            if names is None:
+                names = [j.name for j in record.joints]
+                writer.writerow(["t", *names])
+            writer.writerow(
+                [
+                    f"{(msg.log_time - base_ns) / 1e9:.4f}",
+                    *[f"{j.position:.6f}" for j in record.joints],
+                ]
+            )
+            rows += 1
+    return rows
+
+
 def write_sweeps(path: Path, out_dir: Path) -> int:
     """Raw float32 x,y,z,intensity per frame, plus an index the Mojo side reads."""
     out_dir.mkdir(parents=True, exist_ok=True)

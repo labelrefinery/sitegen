@@ -6,13 +6,16 @@ different geometry -- and every reason for them not to. What changed when the
 actors became meshes is only what sits behind this interface: a slab test per
 oriented box became a BVH over triangles.
 
-Terrain stayed analytic. A ground plane and two cones at the angle of repose
-are exact and free, where a heightmap mesh would be neither, and Blender builds
-the identical plane and cones on its side, so the two renderers still agree
-about the ground. The one place they can differ is a cone's silhouette, where
-Blender's 128-gon is inscribed in the analytic cone -- and since ground, pile
-and sky all carry instance id 0, a disagreement there is invisible in the
-instance masks by construction.
+Terrain used to stay analytic, for the same reason: a plane and two cones are
+exact where a mesh is an approximation. It stopped being an option when the
+ground had to change. `--terrain deforming` hands this layer a
+`heightfield.GroundSurface` instead -- 80,000 triangles under a BVH of their
+own, plus the analytic plane for everything outside the patch -- and the
+terrain BVH is rebuilt only when the ground actually changes, once a second at
+most, rather than per frame with the actors. Blender is given the same vertex
+array, so the two sensors still agree about the ground; where they can differ
+is a silhouette, and since ground, pile and sky all carry instance id 0, a
+disagreement there is invisible in the instance masks by construction.
 
 `embreex` is the ray engine, through trimesh. Open3D would have been the other
 option and has no wheels for this interpreter; embree does the same job at
@@ -29,7 +32,6 @@ from numpy.typing import NDArray
 
 from .geometry import Array, Box, IndexArray, Part
 from .meshes import mesh as mesh_for
-from .terrain import Terrain
 
 
 @dataclass(frozen=True)
@@ -51,16 +53,15 @@ class Raycaster(Protocol):
     def intersect(self, origin: Array, dirs: Array) -> Hits: ...
 
 
-def _terrain_hits(terrain: Terrain, origin: Array, dirs: Array) -> Hits:
-    t = terrain.intersect(origin, dirs)
-    return Hits(
-        t=t,
-        source=np.full(t.shape, -1, dtype=np.int32),
-        # Flat enough for shading: the piles are shallow and the ground is a
-        # plane. The raycast camera is the only consumer, and it is no longer
-        # the default one.
-        normal=np.tile(np.array([0.0, 0.0, 1.0]), (len(dirs), 1)),
-    )
+class Ground(Protocol):
+    """Whatever is under the actors: `terrain.Terrain` or a committed patch."""
+
+    def hits(self, origin: Array, dirs: Array) -> tuple[Array, Array]: ...
+
+
+def _terrain_hits(ground: Ground, origin: Array, dirs: Array) -> Hits:
+    t, normal = ground.hits(origin, dirs)
+    return Hits(t=t, source=np.full(t.shape, -1, dtype=np.int32), normal=normal)
 
 
 @dataclass
@@ -73,7 +74,7 @@ class BoxCaster:
     """
 
     boxes: list[Box]
-    terrain: Terrain
+    terrain: Ground
 
     def intersect(self, origin: Array, dirs: Array) -> Hits:
         hits = _terrain_hits(self.terrain, origin, dirs)
@@ -127,7 +128,7 @@ class MeshCaster:
     where the boom passes in front of the truck.
     """
 
-    def __init__(self, parts: list[Part], terrain: Terrain) -> None:
+    def __init__(self, parts: list[Part], terrain: Ground) -> None:
         try:
             from trimesh import Trimesh
             from trimesh.ray.ray_pyembree import RayMeshIntersector
@@ -194,5 +195,5 @@ class MeshCaster:
         return Hits(t=t, source=source, normal=normal)
 
 
-def caster(parts: list[Part], boxes: list[Box], terrain: Terrain, meshes: bool) -> Raycaster:
+def caster(parts: list[Part], boxes: list[Box], terrain: Ground, meshes: bool) -> Raycaster:
     return MeshCaster(parts, terrain) if meshes else BoxCaster(boxes, terrain)

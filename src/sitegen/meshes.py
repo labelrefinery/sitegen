@@ -29,7 +29,6 @@ tracks throws away the one cue the probe showed was doing the work.
 
 from __future__ import annotations
 
-import functools
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -396,16 +395,36 @@ _BUILDERS = {
 }
 
 
-@functools.cache
+#: Built meshes, by name. A dictionary rather than `functools.cache` because
+#: one mesh in the scene is not a constant: the soil in the hauler's body
+#: changes shape every time a bucket goes in, and `register` is how the
+#: earthworks simulation hands each committed load surface to the two sensors
+#: and to the Cycles bridge under a name they can both address it by.
+_CACHE: dict[str, Mesh] = {}
+
+
+def register(name: str, built: Mesh) -> str:
+    """Add a mesh that no builder can produce, and return its name."""
+    _CACHE[name] = built
+    _BOUNDS.pop(name, None)
+    return name
+
+
 def mesh(name: str) -> Mesh:
     """The mesh for one link, built once and shared."""
-    return _BUILDERS[name]()
+    if name not in _CACHE:
+        _CACHE[name] = _BUILDERS[name]()
+    return _CACHE[name]
 
 
-@functools.cache
+_BOUNDS: dict[str, tuple[Array, Array]] = {}
+
+
 def bounds(name: str) -> tuple[Array, Array]:
     """Local AABB, which is where the ground-truth cuboid comes from."""
-    return mesh(name).bounds()
+    if name not in _BOUNDS:
+        _BOUNDS[name] = mesh(name).bounds()
+    return _BOUNDS[name]
 
 
 def names() -> tuple[str, ...]:

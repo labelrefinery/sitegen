@@ -1,9 +1,17 @@
 """Ground and stockpiles, as analytically intersectable primitives.
 
-A heightmap would need ray marching; a plane plus a few cones is exact, which
-matters when four million rays go through this per scene. The cones are also
+A plane plus a few cones is exact and costs nothing, which is what it was
+chosen for when four million rays a scene went through it. The cones are also
 physically honest: loose material piles at its angle of repose, so the
 radius-to-height ratio is a material property rather than a free parameter.
+
+What it cannot do is change, and that is why it is no longer the default.
+`--terrain deforming` replaces the whole of this with an elevation grid the
+bucket cuts into -- see `heightfield.py` -- and takes its starting shape by
+sampling exactly these primitives, so the site begins as the same site.
+`--terrain static` keeps this module in the ray path, which is what makes
+`--terrain static --actors boxes --sensor legacy` reproduce the pre-terrain
+recordings byte for byte.
 """
 
 from __future__ import annotations
@@ -78,6 +86,18 @@ class Terrain:
         for pile in self.stockpiles:
             t = np.minimum(t, pile.intersect(origin, dirs))
         return t
+
+    def hits(self, origin: Array, dirs: Array) -> tuple[Array, Array]:
+        """(distance, normal) per ray, the interface a caster asks the ground.
+
+        The normal is flat everywhere and always was: the piles are shallow,
+        the ground is a plane, and the only consumer is the raycast camera,
+        which is no longer the default one. `heightfield.GroundSurface` answers
+        the same question with real face normals, because there it has them.
+        """
+        return self.intersect(origin, dirs), np.tile(
+            np.array([0.0, 0.0, 1.0]), (len(dirs), 1)
+        )
 
     def heightmap(self, cells: int = 120) -> tuple[Array, float]:
         """(cells, cells) elevation grid over [-extent, extent], and its pitch."""

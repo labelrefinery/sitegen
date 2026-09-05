@@ -23,7 +23,9 @@ from .actors import (
     truck_parts,
     worker_part,
 )
-from .geometry import Box, Part
+from .earthworks import Timeline, Volumes, simulate
+from .geometry import Box, Part, part_at, rot_z
+from .raycast import Ground
 from .sensors import DustEvent
 from .terrain import Stockpile, Terrain
 
@@ -31,6 +33,14 @@ CYCLE_S = 15.0
 DIG_SWING = np.radians(-35.0)
 DUMP_SWING = np.radians(75.0)
 TRUCK_SPOT = (7.5, 9.0, np.radians(105.0))
+
+#: (arrives at the spot, leaves it, name). A hauler is in the scene from six
+#: seconds before it arrives -- backing in down the haul road -- until eight
+#: after it leaves, and it takes whatever is in its body with it when it goes.
+TRUCK_CYCLES: tuple[tuple[float, float, str], ...] = (
+    (4.0, 33.0, "truck_a"),
+    (46.0, 95.0, "truck_b"),
+)
 
 #: workers_at() returns the spotter first and the crosser second, and the two
 #: baked poses follow: one stands, one walks.
@@ -70,6 +80,11 @@ class SceneState:
     """One per part, in the same order -- the oracle's cuboids."""
     ego_part_count: int
     """Parts [0, ego_part_count) belong to the ego machine."""
+    ground: Ground
+    """What the ray casters put under the actors at this instant: the analytic
+    plane and cones, or the ground patch as it stood at the last commit."""
+    volumes: Volumes | None
+    """The material balance at this instant, or None on static terrain."""
 
 
 @dataclass
@@ -82,9 +97,17 @@ class Scene:
     mesh_actors: bool = True
     """Cuboids come from the posed meshes rather than the hand-written
     envelopes. False is the box renderer this started as, kept reproducible."""
+    deforming: bool = True
+    """The bucket moves soil. False keeps the analytic plane and cones, which
+    is the only way `--actors boxes --sensor legacy` still reproduces the
+    pre-terrain recordings byte for byte."""
     terrain: Terrain = field(default_factory=lambda: Terrain([]))
+    """The ground as it was at t0. On deforming terrain this is still what the
+    site is *built* from -- the grid is sampled off these primitives -- but it
+    is no longer what the sensors intersect after the first bucketful."""
     dust: list[DustEvent] = field(default_factory=list)
     _stakes: list[Part] = field(default_factory=list, repr=False)
+    _earth: Timeline | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         rng = np.random.default_rng(self.seed)
@@ -102,6 +125,17 @@ class Scene:
             stake_part(-6.0 + 3.0 * i, 19.0 + float(rng.normal(0.0, 0.15)), i)
             for i in range(6)
         ]
+        # Everything above is a pure function of the seed. The earthworks are
+        # not, so they are run once here and read back by frame afterwards.
+        self._earth = simulate(self, self.duration_s) if self.deforming else None
+
+    @property
+    def cycle_s(self) -> float:
+        return CYCLE_S
+
+    @property
+    def earthworks(self) -> Timeline | None:
+        return self._earth
 
     # -- actors ------------------------------------------------------------
 
@@ -157,8 +191,7 @@ class Scene:
 
     def truck_at(self, t: float) -> tuple[float, float, float] | None:
         """Backs in, is loaded, hauls off; a second truck takes its place."""
-        cycles = [(4.0, 33.0, "truck_a"), (46.0, 95.0, "truck_b")]
-        for arrive, depart, _ in cycles:
+        for arrive, depart, _ in TRUCK_CYCLES:
             if t < arrive - 6.0 or t > depart + 8.0:
                 continue
             x, y, yaw = TRUCK_SPOT
@@ -174,6 +207,19 @@ class Scene:
                 u = smoothstep(depart, depart + 8.0, t)
                 return lerp(x, x + 30.0, u), lerp(y, y + 20.0, u), yaw
             return x, y, yaw
+        return None
+
+    def truck_cycle(self, t: float) -> tuple[float, float, str] | None:
+        """Which hauler cycle owns this instant, if any.
+
+        The earthworks need what `truck_at` throws away: not where the body is
+        but whose it is, and whether it is standing at the spot or already
+        rolling. A bucket tipped while nothing is standing there goes to a
+        pile, and a body that leaves takes its load off the site.
+        """
+        for row in TRUCK_CYCLES:
+            if row[0] - 6.0 <= t <= row[1] + 8.0:
+                return row
         return None
 
     def workers_at(self, t: float) -> list[tuple[float, float, float]]:
@@ -192,6 +238,23 @@ class Scene:
         if truck is not None:
             name = "truck_a" if t < 40.0 else "truck_b"
             parts.extend(truck_parts(truck[0], truck[1], truck[2], name))
+            load = self._earth.load(t) if self._earth is not None else None
+            if load is not None:
+                mesh_name, (centre, half) = load
+                # The soil rides in the bed link's own frame, so it is placed
+                # by the same rotation and translation the body is -- one
+                # transform, not a load pose that can drift off the truck.
+                parts.append(
+                    part_at(
+                        rot_z(truck[2]),
+                        np.array([truck[0], truck[1], 0.0]),
+                        centre,
+                        half,
+                        mesh_name,
+                        "haul_truck.load",
+                        name,
+                    )
+                )
         for i, (wx, wy, wyaw) in enumerate(self.workers_at(t)):
             parts.append(
                 worker_part(wx, wy, wyaw, f"worker_{i}", WORKER_POSE[i % 2])
@@ -202,4 +265,6 @@ class Scene:
             parts=parts,
             boxes=[p.box(self.mesh_actors) for p in parts],
             ego_part_count=ego_parts,
+            ground=self.terrain if self._earth is None else self._earth.surface(t),
+            volumes=None if self._earth is None else self._earth.volumes_at(t),
         )

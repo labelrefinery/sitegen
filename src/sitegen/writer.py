@@ -7,10 +7,11 @@ The split is the contract of this whole tool:
                                       seed an unlabeled pipeline bootstraps from
     /tf                  observable   rig transforms
     /gnss                observable   ego global pose
-    /terrain/heightmap   observable   published once at the start
+    /terrain/heightmap   observable   the ground, at t0 and whenever it changes
 
     /ground_truth/actors      HELD OUT  per-part cuboids for every actor
     /ground_truth/points      HELD OUT  per-point instance ids
+    /ground_truth/volumes     HELD OUT  the site's material balance
 
 A labeler reads the first group. Only the scorer reads the second. Keeping
 them in one file rather than two is deliberate -- the truth cannot drift from
@@ -46,7 +47,9 @@ from mcap_protobuf.writer import Writer
 from .actors import SLEW_HEIGHT, sensor_pose
 from .camera import SURROUND_RIG, CameraIntrinsics, camera_pose, render
 from .cycles import Shot, missing_assets, placements, run as run_cycles, write_job
+from .earthworks import TERRAIN_COMMIT_HZ
 from .geometry import Array, Box, quat_from_matrix
+from .heightfield import GroundSurface
 from .raycast import caster
 from .scene import Scene
 from .sensors import Lidar, intensity as lidar_intensity, sweep
@@ -118,6 +121,13 @@ def _cloud(ns: int, frame: str, points: Array, fourth: Array, fields: list[Packe
     )
 
 
+#: The published heightmap is decimated to this pitch. Half a metre is what a
+#: drone survey of a site actually delivers, it is coarser than the 0.25 m grid
+#: the oracle integrates, and it keeps the topic near the 14,400 points it
+#: published as a one-off before the ground could move.
+HEIGHTMAP_PUBLISH_PITCH_M = 0.5
+
+
 def _albedo_key(box: Box) -> str:
     """Which `sensors.REMISSION` row a return off this box is drawn from.
 
@@ -125,9 +135,15 @@ def _albedo_key(box: Box) -> str:
     half the remission of the `heavy_machinery` parked beside it -- the sensor
     sees its own house at a grazing angle from half a metre away, which is a
     different measurement from seeing a machine across the site.
+
+    Soil in the back of a hauler is soil: it is drawn from the terrain row
+    rather than the truck's, because what the beam lands on is a load of dirt
+    and the point of a per-class albedo is that it says what was hit.
     """
     if box.instance_id == "ego":
         return "ego"
+    if box.class_name == "haul_truck.load":
+        return "terrain"
     return box.class_name.split(".")[0]
 
 
@@ -144,6 +160,37 @@ def _cube(box: Box) -> CubePrimitive:
             x=2 * box.half_extents[0], y=2 * box.half_extents[1], z=2 * box.half_extents[2]
         ),
         color=Color(r=r, g=g, b=b, a=0.45),
+    )
+
+
+def _static_heightmap(scene: Scene, ns: int) -> PointCloud:
+    """The analytic ground, sampled once. What `--terrain static` publishes."""
+    heights, _ = scene.terrain.heightmap()
+    axis = np.linspace(
+        -scene.terrain.extent, scene.terrain.extent, heights.shape[0]
+    )
+    gx, gy = np.meshgrid(axis, axis, indexing="xy")
+    return _cloud(
+        ns,
+        "map",
+        np.stack([gx, gy, heights], axis=-1).reshape(-1, 3),
+        heights.reshape(-1),
+        _xyzi_fields(),
+    )
+
+
+def _patch_heightmap(surface: GroundSurface, ns: int) -> PointCloud:
+    """The deforming patch, decimated to the pitch a survey would report."""
+    step = max(1, int(round(HEIGHTMAP_PUBLISH_PITCH_M / surface.field.pitch)))
+    z = surface.field.z[::step, ::step]
+    ax, ay = surface.field.axes()
+    gx, gy = np.meshgrid(ax[::step], ay[::step], indexing="ij")
+    return _cloud(
+        ns,
+        "map",
+        np.stack([gx, gy, z], axis=-1).reshape(-1, 3),
+        z.reshape(-1),
+        _xyzi_fields(),
     )
 
 
@@ -164,9 +211,12 @@ def _shots(
     for i in range(frames):
         if not camera_every or i % camera_every:
             continue
-        state = scene.state_at(i / rate_hz)
+        t = i / rate_hz
+        state = scene.state_at(t)
         house_r, _ = sensor_pose(state.ego)
         house_t = np.array([state.ego.x, state.ego.y, SLEW_HEIGHT])
+        earth = scene.earthworks
+        terrain = 0 if earth is None else int(earth.surface_at[earth.frame(t)])
         for cam_name, offset, pan in SURROUND_RIG:
             cam_r, cam_t = camera_pose(house_r, house_t, np.array(offset), pan)
             shots.append(
@@ -177,6 +227,7 @@ def _shots(
                     objects=placements(
                         state.parts, list(range(1, len(state.parts) + 1))
                     ),
+                    terrain=terrain,
                 )
             )
     return shots
@@ -197,6 +248,7 @@ def generate(
     camera_height: int = 540,
     camera_fov_deg: float = 78.0,
     mesh_actors: bool = True,
+    deforming: bool = True,
     camera_renderer: str = "cycles",
     camera_assets: Path | None = None,
     camera_samples: int = 48,
@@ -208,6 +260,7 @@ def generate(
         duration_s=duration_s,
         difficulty=difficulty,
         mesh_actors=mesh_actors,
+        deforming=deforming,
     )
     lidar = Lidar(
         beams=beams,
@@ -256,37 +309,32 @@ def generate(
                 shots,
                 intrinsics=intrinsics,
                 assets=assets,
-                stockpiles=[
-                    (p.x, p.y, p.height) for p in scene.terrain.stockpiles
-                ],
+                terrain=scene.terrain,
+                surfaces=earth.surfaces if (earth := scene.earthworks) else None,
                 samples=camera_samples,
             ),
             renders,
         )
 
+    # The ground is published at t0 whichever mode this is, so a consumer that
+    # reads one message and stops still gets a surface. On deforming terrain it
+    # is republished when it changes -- bounded by the commit rate, which is
+    # also the rate at which it *can* change -- and a run where nothing moves
+    # emits exactly the one message it always did.
+    published_version = -1
+    volumes_every = max(1, int(round(rate_hz / TERRAIN_COMMIT_HZ)))
+
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "wb") as f, Writer(f) as w:
-        # Terrain is static; publish it once so a consumer has it from frame 0.
-        heights, pitch = scene.terrain.heightmap()
+        first = scene.state_at(0.0)
+        if isinstance(first.ground, GroundSurface):
+            heightmap = _patch_heightmap(first.ground, base_ns)
+            published_version = first.ground.version
+        else:
+            heightmap = _static_heightmap(scene, base_ns)
         w.write_message(
             topic="/terrain/heightmap",
-            message=_cloud(
-                base_ns,
-                "map",
-                np.stack(
-                    [
-                        *np.meshgrid(
-                            np.linspace(-scene.terrain.extent, scene.terrain.extent, heights.shape[0]),
-                            np.linspace(-scene.terrain.extent, scene.terrain.extent, heights.shape[0]),
-                            indexing="xy",
-                        ),
-                        heights,
-                    ],
-                    axis=-1,
-                ).reshape(-1, 3),
-                heights.reshape(-1),
-                _xyzi_fields(),
-            ),
+            message=heightmap,
             log_time=base_ns,
             publish_time=base_ns,
         )
@@ -298,7 +346,20 @@ def generate(
             state = scene.state_at(t)
             sensor_r, sensor_t = sensor_pose(state.ego)
 
-            rays = caster(state.parts, state.boxes, scene.terrain, mesh_actors)
+            if (
+                isinstance(state.ground, GroundSurface)
+                and state.ground.version != published_version
+            ):
+                published_version = state.ground.version
+                w.write_message(
+                    topic="/terrain/heightmap",
+                    message=_patch_heightmap(state.ground, ns),
+                    log_time=ns,
+                    publish_time=ns,
+                )
+                bump("/terrain/heightmap")
+
+            rays = caster(state.parts, state.boxes, state.ground, mesh_actors)
             points, source = sweep(
                 lidar, sensor_r, sensor_t, rays, rng, scene.dust, t
             )
@@ -469,5 +530,26 @@ def generate(
                     publish_time=ns,
                 )
                 bump("/ground_truth/points")
+
+            # The material balance, once a second: cumulative cut, what is in
+            # the bucket and the body, what has left the site, and the volume
+            # standing in each stockpile. `JointStates` because Foxglove has no
+            # generic named-scalar schema and this is exactly one -- a
+            # timestamped vector of named doubles the Plot panel already reads,
+            # which is the whole reason for using a well-known schema.
+            if state.volumes is not None and i % volumes_every == 0:
+                w.write_message(
+                    topic="/ground_truth/volumes",
+                    message=JointStates(
+                        timestamp=_ts(ns),
+                        joints=[
+                            JointState(name=name, position=value)
+                            for name, value in state.volumes.channels()
+                        ],
+                    ),
+                    log_time=ns,
+                    publish_time=ns,
+                )
+                bump("/ground_truth/volumes")
 
     return counts

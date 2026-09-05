@@ -50,7 +50,7 @@ def _walk(lidar: Lidar, frames: range = SPREAD) -> dict[str, list]:
         t = i / RATE_HZ
         state = scene.state_at(t)
         sensor_r, sensor_t = sensor_pose(state.ego)
-        rays = caster(state.parts, state.boxes, scene.terrain, True)
+        rays = caster(state.parts, state.boxes, state.ground, True)
         points, source = sweep(lidar, sensor_r, sensor_t, rays, rng, scene.dust, t)
         keys = [
             "ego" if b.instance_id == "ego" else b.class_name.split(".")[0]
