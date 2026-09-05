@@ -1,0 +1,15 @@
+[project]
+name = "goose-compare"
+version = "0.1.0"
+description = "Measure GOOSE-Ex against sitegen's analytic LiDAR model"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.5.2",
+    "matplotlib>=3.10",
+    "mcap>=1.4.0",
+    "mcap-protobuf-support>=0.5.4",
+    "foxglove-schemas-protobuf>=0.4.0",
+]
+
+[tool.uv]
+package = false
