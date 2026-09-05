@@ -51,16 +51,20 @@ identical plane and 128-gon cones, so the two sensors agree about the ground.
 Where they can disagree is a cone's silhouette, and there it does not matter:
 ground, pile and sky all carry instance id 0.
 
-**Nothing in the sensor model changed.** 1/r² density, range noise, quadratic
-dropout, dust, ego self-returns — all untouched. Which triangle a ray hit is a
-different question from how a real sensor mangles the answer, and only the
-first one moved.
+**Nothing in the sensor model changed** when the actors became meshes. 1/r²
+density, range noise, quadratic dropout, dust, ego self-returns — all
+untouched. Which triangle a ray hit is a different question from how a real
+sensor mangles the answer, and only the first one moved. The sensor itself was
+calibrated afterwards and separately, against a real machine; that is
+[docs/GOOSE-EX.md](GOOSE-EX.md).
 
 ### What it costs, in returns
 
 The worker is the class that changed, and it changed in the direction that
 makes the dataset harder rather than easier. Over one 60 s `--seed 1` run,
-600 sweeps, 450 azimuth steps:
+600 sweeps, 450 azimuth steps, both columns on the pre-calibration sensor
+(`--sensor legacy`) so that only the geometry differs — the shares at today's
+defaults are in [docs/GOOSE-EX.md](GOOSE-EX.md):
 
 | | boxes | meshes |
 | --- | ---: | ---: |

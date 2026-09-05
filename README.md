@@ -54,14 +54,19 @@ around the machine.
 labels available offline. They are the seed an unlabeled pipeline bootstraps
 from — the same trick STONE uses with a driven trajectory. First thing they buy
 you: the sensor rides the house, so the ego's own boom and roof are in the
-cloud (about 12% of returns), and nothing removes them for you.
+cloud — **27% of returns**, against 28.0% measured on a real excavator-mounted
+rig — and nothing removes them for you.
 
 **The difficulty is in the sensor, not the scene.** Points on a target fall off
 as 1/r², range noise grows with distance, dropout rises quadratically, and dust
-eats returns over a region. A worker at 14 m gets about 11 points; a truck at
-45 m gets a few dozen. That is where naive clustering stops finding things, and
-where a smoother that carried the track forward from when it was close starts
-to pay.
+eats returns over a region. The numbers are not invented: the elevation band,
+the range, the ray budget and the per-class intensity were all measured against
+[GOOSE-Ex](docs/GOOSE-EX.md), 2,164 labelled sweeps from four Ousters on a
+working Liebherr R924. At the default 32 × 450 ray budget a worker at 14 m gets
+**6 returns** and a truck at 45 m about 22; at `--density real`, which spends
+the ray budget the real rig has, the worker gets **40** against a real 141.
+That is where naive clustering stops finding things, and where a smoother that
+carried the track forward from when it was close starts to pay.
 
 **The machine travels.** The walk between dig stations is not decoration. A
 fixed sensor origin quietly removes three things worth testing: the map never
@@ -70,11 +75,12 @@ trajectory for an annotation-free terrain labeler to calibrate against --
 which is the free supervision STONE-style methods depend on, exactly as joint
 angles are for the boom chain.
 
-**Nothing is balanced.** Terrain is ~79% of returns, the ego's own machine is
-~15%, and the two workers together are **0.14%**. Real class imbalance, not a
-curated benchmark — and it got twice as severe when the actors became meshes,
-because half the returns the old worker collected were returns off a cuboid a
-person does not fill.
+**Nothing is balanced.** Terrain is ~70% of returns, the ego's own machine is
+**27%**, and the two workers together are **0.08%**. Real class imbalance, not
+a curated benchmark — and it got four times as severe over two changes: half
+the returns the old worker collected were off a cuboid a person does not fill,
+and widening the elevation band to the real machine's put the other half into
+the ground.
 
 ## Use
 
@@ -89,14 +95,20 @@ uv run sitegen generate --out site.mcap --seed 1 --duration 60
 --rate             sensor Hz (default 10)
 --truth-points-hz  per-point truth rate (default 2); boxes are always at --rate
 --difficulty       scales range noise, dropout and dust severity
+--beams            vertical channels (default 32)
 --azimuth-steps    horizontal resolution (default 450)
+--density          sample (default) or real: 64 x 1440, the real rig's budget
+--sensor           calibrated (default) or legacy, the pre-GOOSE-Ex sensor
 --actors           meshes (default) or boxes, the geometry both sensors see
 --camera-hz        render the four-camera rig; see docs/RENDERING.md
 ```
 
-Roughly 1.4 MB of scene per second at defaults, so a 60 s run is ~85 MB.
-Samples are published as release assets rather than committed — pin one by URL
-and checksum so two pipelines under comparison consume byte-identical input.
+Roughly 1.5 MB of scene per second at defaults, so a 60 s run is ~90 MB in
+8 seconds. `--density real` is 92,160 rays a sweep instead of 14,400: **590 MB
+and 18 seconds** for the same 60 s, and the only setting that puts a worker at
+14 m within a factor of three of the real rig. Samples are published as release
+assets rather than committed — pin one by URL and checksum so two pipelines
+under comparison consume byte-identical input.
 
 ## Reading it in Foxglove
 
@@ -106,7 +118,10 @@ and no custom panel to write.
 1. Open [Foxglove](https://foxglove.dev) and drag `site.mcap` in (or `Cmd/Ctrl-O`).
 2. Add a **3D** panel. Set **Display frame** to `map`.
 3. In the panel's topic list turn on:
-   - `/lidar/points` — set *Color by* to `intensity` for a legible sweep
+   - `/lidar/points` — set *Color by* to `intensity`. It is a per-class
+     albedo now rather than a stand-in for range, so the workers light up:
+     hi-vis PPE returns nearly four times what soil does, which is what it does
+     on a real site
    - `/ground_truth/actors` — the oracle cuboids, coloured by class
    - `/terrain/heightmap` — the static ground and stockpiles
 4. Add a **Plot** panel on `/ego/joint_states` to watch the dig cycle —
@@ -118,7 +133,7 @@ was up against; a labeler must never read it.
 
 ## Seeing a pipeline's labels against the truth
 
-Predictions go in their own file, so the scene stays immutable and one 86 MB
+Predictions go in their own file, so the scene stays immutable and one 90 MB
 recording serves any number of pipeline runs:
 
 ```sh
@@ -193,7 +208,8 @@ instance, three of the four cameras exactly.**
 [docs/RENDERING.md](docs/RENDERING.md) has the whole of it — what each sensor
 sees, asset provenance, timings, and the acceptance table below in full.
 `--actors boxes` and `--camera-renderer raycast` still select the original
-cuboid geometry and flat-shaded renderer; `--actors boxes` reproduces the old
+cuboid geometry and flat-shaded renderer, and `--sensor legacy` the
+pre-calibration LiDAR; `--actors boxes --sensor legacy` reproduces the old
 recordings byte for byte.
 
 ### The rig is four cameras, and the placement matters more than it sounds

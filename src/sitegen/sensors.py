@@ -18,11 +18,17 @@ works:
     and bucket are in the cloud. Nothing removes them for you. Masking them
     from proprioception is the first thing an unlabeled pipeline gets to do
     with its free labels.
+
+The numbers below are no longer asserted. Every default here was measured
+against GOOSE-Ex -- 2,164 labelled sweeps from four Ousters on a Liebherr R924
+working real sites -- and `docs/GOOSE-EX.md` records which statistic each one
+bought. `Lidar.legacy()` is the sensor as it was before that, kept so the
+measurements taken against it stay reproducible.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -33,19 +39,78 @@ if TYPE_CHECKING:  # only for the annotation; raycast imports this module back
     from .raycast import Raycaster
 
 
+#: Raw Ouster remission by class, as (median, p95), measured on the 2,164
+#: labelled ALICE sweeps of GOOSE-Ex. The pair is enough to fix a lognormal:
+#: these distributions are strongly right-skewed, because a return is bright
+#: only when it lands on a retroreflective band rather than on the fabric
+#: beside it, and a constant per class would throw exactly that away. A person
+#: is the brightest thing on a real site -- hi-vis PPE doing what it is for --
+#: and grade stakes carry the same banding for the same reason.
+REMISSION: dict[str, tuple[float, float]] = {
+    "worker": (28.0, 243.0),
+    "grade_stake": (10.0, 123.2),
+    "haul_truck": (15.0, 51.0),
+    "excavator": (15.0, 50.0),
+    "ego": (9.0, 100.0),
+    "terrain": (7.0, 20.0),
+}
+
+#: Ouster reports remission 0-255 with a long tail; sitegen's `intensity`
+#: field stays in [0, 1], so this is the divisor between the two.
+REMISSION_FULL_SCALE = 255.0
+
+#: The p95 of a lognormal sits 1.645 sigma above its median.
+_P95_SIGMAS = 1.6448536269514722
+
+
 @dataclass
 class Lidar:
-    """A 32-beam spinning sensor, roughly a mid-range mechanical unit."""
+    """A spinning sensor, with GOOSE-Ex's excavator rig for its geometry.
+
+    The elevation band and range are the real machine's, not a datasheet's:
+    a rig mounted low on a machine standing in a pit throws most of its beams
+    into the ground within a few metres, which is why 89% of a real sweep
+    lands inside 10 m. `beams` and `azimuth_steps` are *not* the real 320
+    channels -- that is a ray budget the default deliberately does not spend;
+    see `--density real`.
+    """
 
     beams: int = 32
     azimuth_steps: int = 720
-    elevation_min_deg: float = -25.0
-    elevation_max_deg: float = 5.0
-    max_range: float = 60.0
+    elevation_min_deg: float = -45.0
+    elevation_max_deg: float = 15.0
+    max_range: float = 100.0
     range_noise_per_m: float = 0.0015
     range_noise_floor: float = 0.02
-    dropout_at_max_range: float = 0.35
+    dropout_far: float = 0.35
+    """Probability a return at `dropout_range_m` is lost outright."""
+    dropout_range_m: float = 60.0
+    """The distance `dropout_far` is quoted at. Held fixed rather than tied to
+    `max_range`, because whether a return survives 45 m of air is a fact about
+    45 m: quoting it as a fraction of the catalogue range would have meant
+    raising `max_range` 60 -> 100 m silently cut far-field dropout by two
+    thirds, which is a degradation changing behind a range change's back."""
+    per_class_intensity: bool = True
+    """False restores `1 - r/max_range`, which is a pure function of range and
+    says nothing about what the beam hit."""
     _dirs: Array | None = field(default=None, repr=False)
+
+    def legacy(self) -> "Lidar":
+        """This sensor as it was before GOOSE-Ex was measured.
+
+        Every number in `docs/PROBE-WORKER.md` and every pre-calibration table
+        was taken through these settings, and `--actors boxes --sensor legacy`
+        still reproduces those recordings byte for byte -- which it can only do
+        if the intensity path does not draw from the shared generator either,
+        which is what `per_class_intensity` switches off.
+        """
+        return replace(
+            self,
+            elevation_min_deg=-25.0,
+            elevation_max_deg=5.0,
+            max_range=60.0,
+            per_class_intensity=False,
+        )
 
     def directions(self) -> Array:
         """Unit ray directions in the sensor frame, (beams * azimuth, 3)."""
@@ -59,6 +124,37 @@ class Lidar:
                 [np.cos(e) * np.cos(a), np.cos(e) * np.sin(a), np.sin(e)], axis=-1
             ).reshape(-1, 3)
         return self._dirs
+
+
+def intensity(
+    lidar: Lidar,
+    points: Array,
+    source: IndexArray,
+    classes: list[str],
+    rng: np.random.Generator,
+) -> Array:
+    """Per-return intensity in [0, 1]: a class albedo times a range term.
+
+    `classes` is the per-source-index key into `REMISSION`, and -1 is terrain.
+    The albedo is drawn per point rather than looked up, from a lognormal
+    pinned to the measured median and p95 -- so a worker is usually about as
+    bright as the dirt behind them and occasionally four times brighter, which
+    is what the real distribution does and what makes intensity a class signal
+    instead of a second copy of range.
+    """
+    ranges = np.linalg.norm(points, axis=1)
+    fade = np.clip(1.0 - ranges / lidar.max_range, 0.0, 1.0)
+    if not lidar.per_class_intensity:
+        return fade
+
+    keys = ["terrain", *classes]
+    median = np.array([REMISSION[k][0] for k in keys])
+    sigma = np.array(
+        [np.log(REMISSION[k][1] / REMISSION[k][0]) / _P95_SIGMAS for k in keys]
+    )
+    index = source + 1  # -1 (terrain) becomes 0, which is `keys[0]`
+    albedo = median[index] * np.exp(sigma[index] * rng.standard_normal(len(index)))
+    return np.clip(albedo / REMISSION_FULL_SCALE * fade, 0.0, 1.0)
 
 
 @dataclass
@@ -112,7 +208,7 @@ def sweep(
     sigma = lidar.range_noise_floor + lidar.range_noise_per_m * t
     t = t + rng.normal(0.0, sigma)
 
-    keep = rng.random(t.shape) > lidar.dropout_at_max_range * (t / lidar.max_range) ** 2
+    keep = rng.random(t.shape) > lidar.dropout_far * (t / lidar.dropout_range_m) ** 2
 
     points_world = sensor_t + dirs * t[:, None]
     for event in dust:

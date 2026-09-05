@@ -24,6 +24,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import pickle
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -158,7 +159,9 @@ def summarise_goose(
 # ---------------------------------------------------------------------------
 
 
-def summarise_sitegen(scene: Path) -> tuple[Summary, dict[str, int]]:
+def summarise_sitegen(
+    scene: Path,
+) -> tuple[Summary, dict[str, int], dict[str, tuple[int, float, float, float]]]:
     """Read the held-out truth topics and reduce them to the same shape.
 
     `/ground_truth/points` carries a per-point `instance` field which is the
@@ -174,7 +177,14 @@ def summarise_sitegen(scene: Path) -> tuple[Summary, dict[str, int]]:
 
     actors: dict[int, list[str]] = {}
     clouds: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    intensities: dict[int, np.ndarray] = {}
     sweep_sizes: list[int] = []
+    # The observable sweep and the truth cloud are the same points in the same
+    # order, written by the same pass -- so intensity gets its class from the
+    # instance id beside it. Only the last sweep is held, because the truth
+    # cloud for a frame follows its sweep immediately and a `real`-density run
+    # would otherwise carry 44 M floats around for nothing.
+    last: tuple[int, np.ndarray] | None = None
 
     with scene.open("rb") as fh:
         topics = ["/ground_truth/points", "/ground_truth/actors", "/lidar/points"]
@@ -189,11 +199,17 @@ def summarise_sitegen(scene: Path) -> tuple[Summary, dict[str, int]]:
             raw = np.frombuffer(cloud.data, dtype=np.uint8).reshape(-1, cloud.point_stride)
             if channel.topic == "/lidar/points":
                 sweep_sizes.append(len(raw))
+                last = (
+                    message.log_time,
+                    raw[:, 12:16].copy().view(np.float32).ravel(),
+                )
                 continue
             # x y z float32 then a uint32 instance id, 16 bytes a point.
             xyz = raw[:, 0:12].copy().view(np.float32).reshape(-1, 3)
             instance = raw[:, 12:16].copy().view(np.uint32).ravel()
             clouds[message.log_time] = (xyz, instance)
+            if last is not None and last[0] == message.log_time and len(last[1]) == len(xyz):
+                intensities[message.log_time] = last[1]
 
     obs: list[Observation] = []
     histogram: dict[str, int] = {}
@@ -202,10 +218,13 @@ def summarise_sitegen(scene: Path) -> tuple[Summary, dict[str, int]]:
     p99s: list[float] = []
     maxima: list[float] = []
 
+    samples: dict[str, list[np.ndarray]] = {}
+
     for stamp, (xyz, instance) in sorted(clouds.items()):
         ids = actors.get(stamp)
         if ids is None:
             continue  # truth points are published slower than the boxes
+        intensity = intensities.get(stamp)
         ranges = np.linalg.norm(xyz, axis=1)
         total += len(xyz)
         medians.append(float(np.median(ranges)))
@@ -216,6 +235,8 @@ def summarise_sitegen(scene: Path) -> tuple[Summary, dict[str, int]]:
             mask = instance == value
             if value == 0:
                 histogram["terrain"] = histogram.get("terrain", 0) + int(mask.sum())
+                if intensity is not None:
+                    samples.setdefault("terrain", []).append(intensity[mask])
                 continue
             entity = ids[int(value) - 1]
             actor, _, part = entity.partition("/")
@@ -224,6 +245,8 @@ def summarise_sitegen(scene: Path) -> tuple[Summary, dict[str, int]]:
             # find, when the only one present is the one under the sensor.
             class_name = "ego" if actor == "ego" else part.split(".")[0]
             histogram[class_name] = histogram.get(class_name, 0) + int(mask.sum())
+            if intensity is not None:
+                samples.setdefault(class_name, []).append(intensity[mask])
             if actor == "ego":
                 ego += int(mask.sum())
 
@@ -251,6 +274,18 @@ def summarise_sitegen(scene: Path) -> tuple[Summary, dict[str, int]]:
                 )
             )
 
+    remission: dict[str, tuple[int, float, float, float]] = {}
+    for name, chunks in samples.items():
+        # Reported on GOOSE's 0-255 remission scale so the two tables can be
+        # read side by side; sitegen's own field stays in [0, 1].
+        values = np.concatenate(chunks) * 255.0
+        remission[name] = (
+            histogram.get(name, 0),
+            float(values.mean()),
+            float(np.median(values)),
+            float(np.percentile(values, 95)),
+        )
+
     return (
         Summary(
             label="sitegen",
@@ -265,6 +300,7 @@ def summarise_sitegen(scene: Path) -> tuple[Summary, dict[str, int]]:
             observations=obs,
         ),
         histogram,
+        remission,
     )
 
 
@@ -378,18 +414,59 @@ def render_profile(profile: Profile, top: int = 18) -> str:
     return "\n".join(lines)
 
 
-def plot(real: Summary, synth: Summary, out: Path) -> None:
+def render_intensity(
+    real: dict[str, tuple[int, float, float, float]],
+    synth: dict[str, tuple[int, float, float, float]],
+) -> str:
+    """Remission by class, real against sitegen, on one 0-255 scale.
+
+    sitegen writes intensity in [0, 1] because that is what a Foxglove
+    `PointCloud` consumer expects to colour by; it is multiplied up here so the
+    two columns are the same quantity.
+    """
+    lines = [
+        "## Intensity by class",
+        "",
+        "| sitegen class | GOOSE-Ex classes | real mean | median | p95 "
+        "| sitegen mean | median | p95 |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for name, equivalents in goose.SITEGEN_EQUIVALENT.items():
+        present = [e for e in equivalents if e in real]
+        if not present:
+            continue
+        # Weighted by returns, so pooling five ground classes into `terrain`
+        # gives the material mix the real sweep actually saw.
+        weight = np.array([real[e][0] for e in present], dtype=np.float64)
+        stats = np.array([real[e][1:] for e in present], dtype=np.float64)
+        a_mean, a_median, a_p95 = weight @ stats / weight.sum()
+        if name not in synth:
+            lines.append(
+                f"| {name} | {', '.join(equivalents)} "
+                f"| {a_mean:.1f} | {a_median:.1f} | {a_p95:.1f} | -- | -- | -- |"
+            )
+            continue
+        _, b_mean, b_median, b_p95 = synth[name]
+        lines.append(
+            f"| {name} | {', '.join(equivalents)} "
+            f"| {a_mean:.1f} | {a_median:.1f} | {a_p95:.1f} "
+            f"| {b_mean:.1f} | {b_median:.1f} | {b_p95:.1f} |"
+        )
+    return "\n".join(lines)
+
+
+def plot(real: Summary, synth: Summary, out: Path, dense: Summary | None = None) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.4), sharey=True)
+    series = [(real, "#1b6ca8", "o"), (synth, "#d1495b", "s")]
+    if dense is not None:
+        series.append((dense, "#e8a33d", "^"))
     for ax, group in zip(axes, ("person", "vehicle")):
-        for summary, colour, marker in (
-            (real, "#1b6ca8", "o"),
-            (synth, "#d1495b", "s"),
-        ):
+        for summary, colour, marker in series:
             bins = goose.bin_observations(summary.observations, group)
             if not bins:
                 continue
@@ -419,13 +496,33 @@ def main() -> None:
     ap.add_argument("--goose", type=Path, required=True, help="extracted split dir")
     ap.add_argument("--platform", default="alice", help="alice (excavator) or spot")
     ap.add_argument("--scene", type=Path, required=True, help="sitegen .mcap")
+    ap.add_argument(
+        "--dense",
+        type=Path,
+        default=None,
+        help="a second sitegen scene to draw on the plot -- the point of it is "
+        "showing what the ray budget buys, so pass a --density real recording",
+    )
     ap.add_argument("--limit", type=int, default=None, help="cap GOOSE frames")
+    ap.add_argument(
+        "--cache",
+        type=Path,
+        default=None,
+        help="pickle the GOOSE side here and reuse it. The real data never "
+        "changes between sitegen configurations, and reading 605 M returns "
+        "takes minutes, so a calibration sweep should read it once",
+    )
     ap.add_argument("--plot", type=Path, default=None)
     ap.add_argument("--out", type=Path, default=None, help="write the report here too")
     args = ap.parse_args()
 
-    real, profile = summarise_goose(args.goose, args.platform, args.limit)
-    synth, synth_hist = summarise_sitegen(args.scene)
+    if args.cache and args.cache.exists():
+        real, profile = pickle.loads(args.cache.read_bytes())
+    else:
+        real, profile = summarise_goose(args.goose, args.platform, args.limit)
+        if args.cache:
+            args.cache.write_bytes(pickle.dumps((real, profile)))
+    synth, synth_hist, synth_remission = summarise_sitegen(args.scene)
 
     report = "\n\n".join(
         [
@@ -434,13 +531,18 @@ def main() -> None:
             render_classes(profile.per_class, synth_hist),
             render_curve(real, synth, "person"),
             render_curve(real, synth, "vehicle"),
+            render_intensity(profile.remission, synth_remission),
         ]
     )
     print(report)
     if args.out:
         args.out.write_text(report + "\n")
     if args.plot:
-        plot(real, synth, args.plot)
+        dense = None
+        if args.dense:
+            dense, _, _ = summarise_sitegen(args.dense)
+            dense.label = "sitegen --density real"
+        plot(real, synth, args.plot, dense)
         print(f"\nwrote {args.plot}")
 
 

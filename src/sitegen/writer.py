@@ -49,7 +49,7 @@ from .cycles import Shot, missing_assets, placements, run as run_cycles, write_j
 from .geometry import Array, Box, quat_from_matrix
 from .raycast import caster
 from .scene import Scene
-from .sensors import Lidar, sweep
+from .sensors import Lidar, intensity as lidar_intensity, sweep
 
 SITE_LAT, SITE_LON = 37.4419, -122.1430
 
@@ -118,6 +118,19 @@ def _cloud(ns: int, frame: str, points: Array, fourth: Array, fields: list[Packe
     )
 
 
+def _albedo_key(box: Box) -> str:
+    """Which `sensors.REMISSION` row a return off this box is drawn from.
+
+    The ego machine gets its own, because GOOSE-Ex measures `ego_vehicle` at
+    half the remission of the `heavy_machinery` parked beside it -- the sensor
+    sees its own house at a grazing angle from half a metre away, which is a
+    different measurement from seeing a machine across the site.
+    """
+    if box.instance_id == "ego":
+        return "ego"
+    return box.class_name.split(".")[0]
+
+
 def _cube(box: Box) -> CubePrimitive:
     qx, qy, qz, qw = quat_from_matrix(box.rotation)
     base = box.class_name.split(".")[0]
@@ -176,7 +189,9 @@ def generate(
     rate_hz: float = 10.0,
     truth_points_hz: float = 2.0,
     difficulty: float = 1.0,
+    beams: int = 32,
     azimuth_steps: int = 450,
+    sensor: str = "calibrated",
     camera_hz: float = 0.0,
     camera_width: int = 960,
     camera_height: int = 540,
@@ -195,10 +210,13 @@ def generate(
         mesh_actors=mesh_actors,
     )
     lidar = Lidar(
+        beams=beams,
         azimuth_steps=azimuth_steps,
         range_noise_per_m=0.0015 * difficulty,
-        dropout_at_max_range=min(0.9, 0.35 * difficulty),
+        dropout_far=min(0.9, 0.35 * difficulty),
     )
+    if sensor == "legacy":
+        lidar = lidar.legacy()
     rng = np.random.default_rng(seed + 1000)
     counts: dict[str, int] = {}
 
@@ -285,7 +303,16 @@ def generate(
                 lidar, sensor_r, sensor_t, rays, rng, scene.dust, t
             )
 
-            intensity = np.clip(1.0 - np.linalg.norm(points, axis=1) / lidar.max_range, 0.0, 1.0)
+            # Intensity is drawn after the sweep and from the same generator,
+            # so `--sensor legacy` -- which does not draw at all -- leaves the
+            # stream where it was and reproduces the old files byte for byte.
+            intensity = lidar_intensity(
+                lidar,
+                points,
+                source,
+                [_albedo_key(box) for box in state.boxes],
+                rng,
+            )
             w.write_message(
                 topic="/lidar/points",
                 message=_cloud(ns, "lidar", points, intensity, _xyzi_fields()),

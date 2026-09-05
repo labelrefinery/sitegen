@@ -10,7 +10,19 @@ from . import score as scoring
 from .writer import generate
 
 
+#: `--density real` spends the ray budget the real rig has: 64 channels and
+#: 1440 azimuth steps is 92,160 rays a sweep against the default's 14,400.
+DENSITY = {"sample": (32, 450), "real": (64, 1440)}
+
+
 def _cmd_generate(args: argparse.Namespace) -> None:
+    # An explicit --beams or --azimuth-steps beats the profile, so `--density
+    # real --beams 32` is a legal thing to ask for rather than silently ignored.
+    beams, azimuth_steps = DENSITY[args.density]
+    beams = args.beams if args.beams is not None else beams
+    azimuth_steps = (
+        args.azimuth_steps if args.azimuth_steps is not None else azimuth_steps
+    )
     counts = generate(
         out=args.out,
         seed=args.seed,
@@ -18,7 +30,9 @@ def _cmd_generate(args: argparse.Namespace) -> None:
         rate_hz=args.rate,
         truth_points_hz=args.truth_points_hz,
         difficulty=args.difficulty,
-        azimuth_steps=args.azimuth_steps,
+        beams=beams,
+        azimuth_steps=azimuth_steps,
+        sensor=args.sensor,
         camera_hz=args.camera_hz,
         camera_width=args.camera_width,
         camera_height=args.camera_height,
@@ -121,7 +135,34 @@ def main() -> None:
         default=1.0,
         help="scales range noise, dropout and dust severity",
     )
-    g.add_argument("--azimuth-steps", type=int, default=450)
+    g.add_argument(
+        "--beams",
+        type=int,
+        default=None,
+        help="vertical channels (default 32; --density real makes it 64)",
+    )
+    g.add_argument(
+        "--azimuth-steps",
+        type=int,
+        default=None,
+        help="horizontal resolution (default 450; --density real makes it 1440)",
+    )
+    g.add_argument(
+        "--density",
+        choices=tuple(DENSITY),
+        default="sample",
+        help="sample is the cheap default the published sample was made with; "
+        "real spends the ray budget that puts a worker at 14 m within a few "
+        "points of the real rig, at roughly six times the file size and time",
+    )
+    g.add_argument(
+        "--sensor",
+        choices=("calibrated", "legacy"),
+        default="calibrated",
+        help="calibrated is the elevation band, range and per-class intensity "
+        "measured against GOOSE-Ex; legacy is the sensor as it was before "
+        "that, and with --actors boxes reproduces the old recordings exactly",
+    )
     g.add_argument(
         "--actors",
         choices=("meshes", "boxes"),
