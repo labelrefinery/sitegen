@@ -3,3 +3,4 @@ __pycache__/
 .pyrefly_cache/
 *.mcap
 !samples/*.mcap
+*.render/

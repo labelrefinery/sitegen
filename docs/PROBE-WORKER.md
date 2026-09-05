@@ -200,6 +200,13 @@ which is the half that mattered.
   buy, and the answer is an argument for the "Mesh geometry" item under *Not
   yet*, not an implementation of it.
 
+  *That is no longer true.* Mesh actors and a Cycles camera landed in
+  [RENDERING.md](RENDERING.md) on the strength of this result; the world,
+  ground, camera and engine setup this script used now live in
+  `sitegen.cycles`, and `tools/probe/render.py` imports them rather than
+  keeping its own copy. The probe still runs, and still holds the truck as a
+  box, because the ablation is what makes the finding readable.
+
 ## Deviations from the plan
 
 The probe was specified to drive `blender -b -P script.py`. Blender 5.2.1 was

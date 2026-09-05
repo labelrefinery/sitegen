@@ -1,0 +1,66 @@
+Assets shipped inside the package, and the ones it expects you to fetch.
+
+--------------------------------------------------------------------------
+COMMITTED HERE
+--------------------------------------------------------------------------
+
+worker_stand.ply, worker_walk.ply
+  Derived from "Worker", by Quaternius
+  CC0 1.0 (public domain dedication)
+  https://poly.pizza/m/Yg2bQZO6Hj
+  https://static.poly.pizza/3a5f3056-ffe6-42eb-bd52-122afcbd22b2.glb
+
+  Rigged and skinned, with 24 baked animations and the hard hat and hi-vis
+  vest on their own materials. Stylised low-poly and flat-coloured rather
+  than photoreal, which makes every detection number measured on it a lower
+  bound: a scanned human should do at least as well.
+
+  What was applied, by tools/bake_worker.py:
+    - imported the GLB, deleted the shadow-blob sphere the pack ships with
+      (it would be a floating ball in the LiDAR return);
+    - posed the armature with the `Idle` action for `worker_stand` and `Walk`
+      for `worker_walk`, sampled at frame 12 rather than rest, because rest
+      is a stance that reads as neither standing nor walking;
+    - evaluated the modifier stack to world-space triangles, 5240 each;
+    - rotated +90 degrees about z, because the asset faces -y and sitegen
+      measures yaw from +x;
+    - scaled uniformly to 1.75 m tall -- actors.WORKER, the height of the box
+      it replaces -- and moved so the feet sit on z = 0 at the origin.
+
+  Material *names* survive the bake and the triangle material indices with
+  them; the colours are re-declared in cycles.PALETTE. Everything else about
+  the source asset is discarded.
+
+Every other actor mesh -- both excavator ends, the boom chain, the bucket,
+both units of the hauler, the grade stakes -- is procedural, built from
+extruded convex profiles in meshes.py. That is a deviation from the plan and
+the reason is in docs/RENDERING.md: no CC0 excavator or dump truck appears to
+exist, and 3D-ConHE is not reachable.
+
+--------------------------------------------------------------------------
+NOT COMMITTED -- what `--camera-assets` points at
+--------------------------------------------------------------------------
+
+These are 15 MB of texture and would double the size of the repository, so
+they are downloaded rather than vendored. All CC0.
+
+  Environment lighting
+    "Kloofendal 43d Clear (Pure Sky)", 2K HDR, by Andreas Mischok (Poly Haven)
+    https://polyhaven.com/a/kloofendal_43d_clear_puresky
+    https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/kloofendal_43d_clear_puresky_2k.hdr
+
+    A pure-sky HDRI, chosen over the probe's `construction_yard` because that
+    one's backdrop contains real people and vehicles and they generated their
+    own detections above the horizon. This one lights the site the same way
+    and puts nothing in it.
+
+  Ground material
+    "Gravel", 2K JPG, by Dimitrios Savva (Poly Haven)
+    https://polyhaven.com/a/gravel
+    https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/gravel/gravel_diff_2k.jpg
+    https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/gravel/gravel_rough_2k.jpg
+    https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/gravel/gravel_nor_gl_2k.jpg
+
+  Renderer
+    Blender 5.2.1 LTS, Cycles, via the official `bpy` PyPI module (GPL-3.0),
+    run as a subprocess -- see cycles.py for why it is not a dependency.

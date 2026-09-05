@@ -13,9 +13,15 @@ The truck stays a pair of boxes on purpose. It is the control: the baseline
 detector already finds it, so if its score survives the change of renderer the
 comparison is measuring the worker and not a change of everything at once.
 
+The world, ground, camera and engine setup now come from `sitegen.cycles`,
+which is where they ended up when the probe's answer turned into sitegen's
+renderer. This script keeps only what is specific to the experiment: the boxes
+it deliberately leaves as boxes, and the rigged GLB it poses on the fly rather
+than using the baked meshes the package ships.
+
 Run it against the Blender Python module, which is the same build as the app:
 
-    uv run --python 3.13 --with bpy==5.2.1 \
+    uv run --isolated --no-project --python 3.13 --with bpy==5.2.1 --with numpy \
         python tools/probe/render.py --views <dir> --assets <dir> --out <dir>
 
 `sitegen cameras` writes <dir>/views.json; see tools/probe/CREDITS for where
@@ -30,18 +36,19 @@ import math
 import sys
 from pathlib import Path
 
-import bpy  # type: ignore[import-not-found]
-import addon_utils  # type: ignore[import-not-found]
-from mathutils import Matrix, Vector  # type: ignore[import-not-found]
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
-#: Blender's default 36 mm sensor; the lens is derived from it and fx.
-SENSOR_MM = 36.0
+import bpy  # type: ignore[import-not-found]  # noqa: E402
+import addon_utils  # type: ignore[import-not-found]  # noqa: E402
+import mathutils  # type: ignore[import-not-found]  # noqa: E402
+from mathutils import Vector  # type: ignore[import-not-found]  # noqa: E402
+
+from sitegen.cycles import camera as place_camera, engine, ground, world_hdri  # noqa: E402
 
 #: The stockpiles, from sitegen.scene: cones at the angle of repose. They are
 #: 20 m out and read as low mounds, but leaving them out would change the
 #: horizon the detector sees, and the point is to change one thing.
 STOCKPILES = [(18.0, -11.0, 3.4), (-14.0, 14.0, 2.1)]
-REPOSE_DEG = 34.0
 
 #: Metres, from actors.WORKER -- the asset is scaled to the box it replaces.
 WORKER_HEIGHT_M = 1.75
@@ -56,74 +63,6 @@ POSE_BY_INSTANCE = {"worker_0": "Idle", "worker_1": "Walk"}
 
 def clear() -> None:
     bpy.ops.wm.read_factory_settings(use_empty=True)
-
-
-def world_hdri(path: Path, strength: float = 1.0, rotation_deg: float = 0.0) -> None:
-    """An outdoor environment, which is both the key light and the sky."""
-    world = bpy.data.worlds.new("site")
-    world.use_nodes = True
-    bpy.context.scene.world = world
-    nodes, links = world.node_tree.nodes, world.node_tree.links
-    nodes.clear()
-    out = nodes.new("ShaderNodeOutputWorld")
-    bg = nodes.new("ShaderNodeBackground")
-    bg.inputs["Strength"].default_value = strength
-    env = nodes.new("ShaderNodeTexEnvironment")
-    env.image = bpy.data.images.load(str(path))
-    mapping = nodes.new("ShaderNodeMapping")
-    mapping.inputs["Rotation"].default_value[2] = math.radians(rotation_deg)
-    coord = nodes.new("ShaderNodeTexCoord")
-    links.new(coord.outputs["Generated"], mapping.inputs["Vector"])
-    links.new(mapping.outputs["Vector"], env.inputs["Vector"])
-    links.new(env.outputs["Color"], bg.inputs["Color"])
-    links.new(bg.outputs["Background"], out.inputs["Surface"])
-
-
-def ground(assets: Path, size: float = 400.0, tile_m: float = 2.0) -> None:
-    """A plane at z = 0 -- sitegen's ground -- with a gravel PBR material."""
-    bpy.ops.mesh.primitive_plane_add(size=size, location=(0.0, 0.0, 0.0))
-    plane = bpy.context.object
-
-    material = bpy.data.materials.new("gravel")
-    material.use_nodes = True
-    nodes, links = material.node_tree.nodes, material.node_tree.links
-    bsdf = nodes["Principled BSDF"]
-
-    coord = nodes.new("ShaderNodeTexCoord")
-    mapping = nodes.new("ShaderNodeMapping")
-    # Object coordinates are metres here, because the plane is unscaled.
-    mapping.inputs["Scale"].default_value = (1 / tile_m,) * 3
-    links.new(coord.outputs["Object"], mapping.inputs["Vector"])
-
-    def image(name: str, colorspace: str):
-        node = nodes.new("ShaderNodeTexImage")
-        node.image = bpy.data.images.load(str(assets / name))
-        node.image.colorspace_settings.name = colorspace
-        node.extension = "REPEAT"
-        links.new(mapping.outputs["Vector"], node.inputs["Vector"])
-        return node
-
-    links.new(image("gravel_diff_2k.jpg", "sRGB").outputs["Color"], bsdf.inputs["Base Color"])
-    links.new(image("gravel_rough_2k.jpg", "Non-Color").outputs["Color"], bsdf.inputs["Roughness"])
-    normal = nodes.new("ShaderNodeNormalMap")
-    links.new(image("gravel_nor_gl_2k.jpg", "Non-Color").outputs["Color"], normal.inputs["Color"])
-    links.new(normal.outputs["Normal"], bsdf.inputs["Normal"])
-    plane.data.materials.append(material)
-
-    dirt = bpy.data.materials.new("pile")
-    dirt.use_nodes = True
-    dirt.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (
-        0.14, 0.10, 0.07, 1.0
-    )
-    dirt.node_tree.nodes["Principled BSDF"].inputs["Roughness"].default_value = 0.95
-    for x, y, height in STOCKPILES:
-        bpy.ops.mesh.primitive_cone_add(
-            radius1=height / math.tan(math.radians(REPOSE_DEG)),
-            depth=height,
-            location=(x, y, height / 2.0),
-            vertices=48,
-        )
-        bpy.context.object.data.materials.append(dirt)
 
 
 def box(center, size, yaw: float, color, roughness: float = 0.45) -> None:
@@ -206,48 +145,19 @@ def worker(glb: Path, center, yaw: float, ground_z: float, pose: str) -> None:
 
 
 def camera(view: dict) -> None:
-    """The exported pinhole, converted to Blender's -z-forward convention."""
-    data = bpy.data.cameras.new("cam")
-    obj = bpy.data.objects.new("cam", data)
-    bpy.context.scene.collection.objects.link(obj)
-    bpy.context.scene.camera = obj
-
-    fx, cx = view["K"][0], view["K"][2]
-    fy, cy = view["K"][4], view["K"][5]
-    width, height = view["width"], view["height"]
-    data.sensor_fit = "HORIZONTAL"
-    data.sensor_width = SENSOR_MM
-    data.lens = fx * SENSOR_MM / width
-    data.shift_x = (width / 2.0 - cx) / width
-    data.shift_y = (cy - height / 2.0) / width
-    assert abs(fx - fy) < 1e-6, "square pixels assumed; the exporter writes them"
-
-    # sitegen's rotation maps optical (+x right, +y down, +z forward) to world;
-    # Blender's camera is +x right, +y up, -z forward.
-    r = Matrix(view["rotation"]).to_4x4() @ Matrix.Diagonal((1.0, -1.0, -1.0, 1.0))
-    r.translation = Vector(view["translation"])
-    obj.matrix_world = r
-
-    bpy.context.scene.render.resolution_x = width
-    bpy.context.scene.render.resolution_y = height
-    bpy.context.scene.render.resolution_percentage = 100
-
-
-def engine(samples: int) -> None:
-    addon_utils.enable("cycles", default_set=True, persistent=True)
-    scene = bpy.context.scene
-    scene.render.engine = "CYCLES"
-    scene.cycles.samples = samples
-    scene.cycles.use_denoising = True
-    try:  # Metal where it exists, CPU where it does not.
-        prefs = bpy.context.preferences.addons["cycles"].preferences
-        prefs.compute_device_type = "METAL"
-        prefs.get_devices()
-        for device in prefs.devices:
-            device.use = True
-        scene.cycles.device = "GPU"
-    except Exception as exc:  # noqa: BLE001 -- any failure just means CPU
-        print(f"  (no GPU: {exc}; rendering on CPU)", file=sys.stderr)
+    """The exported pinhole, through the package's converter."""
+    k = view["K"]
+    place_camera(
+        bpy,
+        mathutils,
+        {
+            "width": view["width"],
+            "height": view["height"],
+            "fx": k[0], "fy": k[4], "cx": k[2], "cy": k[5],
+        },
+        view["rotation"],
+        view["translation"],
+    )
 
 
 def main() -> None:
@@ -276,9 +186,9 @@ def main() -> None:
         if args.only and view["name"] != args.only:
             continue
         clear()
-        engine(args.samples)
-        world_hdri(args.assets / args.hdri)
-        ground(args.assets)
+        engine(bpy, addon_utils, args.samples)
+        world_hdri(bpy, args.assets / args.hdri)
+        ground(bpy, args.assets, STOCKPILES)
 
         for actor in view["actors"]:
             cls = actor["class"].split(".")[0]

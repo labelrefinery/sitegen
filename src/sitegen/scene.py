@@ -16,8 +16,14 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .actors import ExcavatorState, excavator_parts, stake_box, truck_parts, worker_box
-from .geometry import Box
+from .actors import (
+    ExcavatorState,
+    excavator_parts,
+    stake_part,
+    truck_parts,
+    worker_part,
+)
+from .geometry import Box, Part
 from .sensors import DustEvent
 from .terrain import Stockpile, Terrain
 
@@ -25,6 +31,10 @@ CYCLE_S = 15.0
 DIG_SWING = np.radians(-35.0)
 DUMP_SWING = np.radians(75.0)
 TRUCK_SPOT = (7.5, 9.0, np.radians(105.0))
+
+#: workers_at() returns the spotter first and the crosser second, and the two
+#: baked poses follow: one stands, one walks.
+WORKER_POSE = ("worker.stand", "worker.walk")
 
 BASE_YAW = np.radians(15.0)
 TRAVEL_START_S = 26.0
@@ -55,9 +65,11 @@ def lerp(a: float, b: float, u: float) -> float:
 @dataclass
 class SceneState:
     ego: ExcavatorState
+    parts: list[Part]
     boxes: list[Box]
+    """One per part, in the same order -- the oracle's cuboids."""
     ego_part_count: int
-    """Boxes [0, ego_part_count) belong to the ego machine."""
+    """Parts [0, ego_part_count) belong to the ego machine."""
 
 
 @dataclass
@@ -67,9 +79,12 @@ class Scene:
     seed: int = 1
     duration_s: float = 60.0
     difficulty: float = 1.0
+    mesh_actors: bool = True
+    """Cuboids come from the posed meshes rather than the hand-written
+    envelopes. False is the box renderer this started as, kept reproducible."""
     terrain: Terrain = field(default_factory=lambda: Terrain([]))
     dust: list[DustEvent] = field(default_factory=list)
-    _stakes: list[Box] = field(default_factory=list, repr=False)
+    _stakes: list[Part] = field(default_factory=list, repr=False)
 
     def __post_init__(self) -> None:
         rng = np.random.default_rng(self.seed)
@@ -84,7 +99,7 @@ class Scene:
             DustEvent(32.0, 39.0, 12.0, 16.0, 9.0, 0.55 * self.difficulty)
         ]
         self._stakes = [
-            stake_box(-6.0 + 3.0 * i, 19.0 + float(rng.normal(0.0, 0.15)), i)
+            stake_part(-6.0 + 3.0 * i, 19.0 + float(rng.normal(0.0, 0.15)), i)
             for i in range(6)
         ]
 
@@ -170,14 +185,21 @@ class Scene:
 
     def state_at(self, t: float) -> SceneState:
         ego = self.ego_at(t)
-        boxes = excavator_parts(ego, "ego")
-        ego_parts = len(boxes)
+        parts = excavator_parts(ego, "ego")
+        ego_parts = len(parts)
 
         truck = self.truck_at(t)
         if truck is not None:
             name = "truck_a" if t < 40.0 else "truck_b"
-            boxes.extend(truck_parts(truck[0], truck[1], truck[2], name))
+            parts.extend(truck_parts(truck[0], truck[1], truck[2], name))
         for i, (wx, wy, wyaw) in enumerate(self.workers_at(t)):
-            boxes.append(worker_box(wx, wy, wyaw, f"worker_{i}"))
-        boxes.extend(self._stakes)
-        return SceneState(ego=ego, boxes=boxes, ego_part_count=ego_parts)
+            parts.append(
+                worker_part(wx, wy, wyaw, f"worker_{i}", WORKER_POSE[i % 2])
+            )
+        parts.extend(self._stakes)
+        return SceneState(
+            ego=ego,
+            parts=parts,
+            boxes=[p.box(self.mesh_actors) for p in parts],
+            ego_part_count=ego_parts,
+        )

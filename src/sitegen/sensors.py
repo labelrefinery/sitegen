@@ -23,11 +23,14 @@ works:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-from .geometry import Array, Box, IndexArray
-from .terrain import Terrain
+from .geometry import Array, IndexArray
+
+if TYPE_CHECKING:  # only for the annotation; raycast imports this module back
+    from .raycast import Raycaster
 
 
 @dataclass
@@ -58,20 +61,6 @@ class Lidar:
         return self._dirs
 
 
-def intersect_box(origin: Array, dirs: Array, box: Box) -> Array:
-    """Slab-method ray-box distances; `inf` where the ray misses."""
-    o = box.rotation.T @ (origin - box.center)
-    d = dirs @ box.rotation
-    with np.errstate(divide="ignore", invalid="ignore"):
-        inv = 1.0 / d
-        t1 = (-box.half_extents - o) * inv
-        t2 = (box.half_extents - o) * inv
-    t_near = np.max(np.minimum(t1, t2), axis=1)
-    t_far = np.min(np.maximum(t1, t2), axis=1)
-    hit = (t_far >= np.maximum(t_near, 0.0)) & (t_near > 0.0)
-    return np.where(hit, t_near, np.inf)
-
-
 @dataclass
 class DustEvent:
     """A cloud of airborne fines that eats returns passing through it."""
@@ -91,28 +80,25 @@ def sweep(
     lidar: Lidar,
     sensor_r: Array,
     sensor_t: Array,
-    boxes: list[Box],
-    terrain: Terrain,
+    caster: "Raycaster",
     rng: np.random.Generator,
     dust: list[DustEvent],
     t_seconds: float,
 ) -> tuple[Array, IndexArray]:
     """One full rotation. Returns (points_in_sensor_frame, source_index).
 
-    `source_index` is the index into `boxes` each point came from, or -1 for
-    terrain. It is written only to the ground-truth topic -- it is per-point
-    semantic truth, and handing it to a labeler would defeat the exercise.
-    """
-    local_dirs = lidar.directions()
-    world_dirs = local_dirs @ sensor_r.T
+    `source_index` is the index into the actor list each point came from, or -1
+    for terrain. It is written only to the ground-truth topic -- it is
+    per-point semantic truth, and handing it to a labeler would defeat the
+    exercise.
 
-    t = terrain.intersect(sensor_t, world_dirs)
-    source = np.full(t.shape, -1, dtype=np.int32)
-    for i, box in enumerate(boxes):
-        t_box = intersect_box(sensor_t, world_dirs, box)
-        closer = t_box < t
-        t = np.where(closer, t_box, t)
-        source = np.where(closer, i, source)
+    Nothing below the intersection changed when actors became meshes. Which
+    triangle a ray hit is a different question from how a real sensor mangles
+    the answer, and only the first one moved.
+    """
+    world_dirs = lidar.directions() @ sensor_r.T
+    hits = caster.intersect(sensor_t, world_dirs)
+    t, source = hits.t, hits.source
 
     valid = np.isfinite(t) & (t < lidar.max_range)
     if not np.any(valid):

@@ -1,19 +1,16 @@
-"""A pinhole camera, rendered with the same raycaster the LiDAR uses.
+"""The pinhole model, and the flat-shaded renderer that came first.
 
-A camera is a spinning sensor whose rays happen to go through a pixel grid
-instead of around an axis, so the intersection code is shared and the geometry
-is guaranteed consistent between the two: a return in the cloud and a pixel in
-the image describe the same surface, because the same ray produced both.
+`CameraIntrinsics` is the camera: it defines the rays, and both renderers use
+it. What lives below it is the original *shaded geometry* path -- flat albedo
+per class, one directional light, a sky gradient -- which is no longer the
+default and is kept because it is instant, needs no Blender, and is what every
+number measured before Cycles was measured on. `--camera-renderer raycast`
+selects it.
 
-What comes out is a *shaded geometry* render -- flat albedo per class, one
-directional light, a sky gradient. It is not photorealistic and is not trying
-to be. It exists so the projection maths, the calibration topic and the
-image-to-instance association can be built and tested end to end; whether a
-model trained on photographs recognises anything in it is a separate question,
-and one worth measuring rather than assuming.
-
-The per-pixel instance ids come out for free, since the raycaster already knows
-which box each ray hit. That is segmentation ground truth nobody had to draw.
+It shares `raycast.Raycaster` with the LiDAR, so a return in the cloud and a
+pixel in the image describe the same surface because the same intersector
+produced both. Cycles reaches that property a longer way round -- see
+`cycles.py` -- and `tests/test_same_surface.py` is what checks it got there.
 """
 
 from __future__ import annotations
@@ -22,8 +19,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .geometry import Array, Box
-from .terrain import Terrain
+from .geometry import Array
+from .raycast import Raycaster
 
 #: Base albedo per class. Deliberately distinguishable rather than accurate.
 ALBEDO: dict[str, tuple[float, float, float]] = {
@@ -69,48 +66,23 @@ class CameraIntrinsics:
         return (d / np.linalg.norm(d, axis=-1, keepdims=True)).reshape(-1, 3)
 
 
-def _intersect_box_normal(origin: Array, dirs: Array, box: Box) -> tuple[Array, Array]:
-    """Slab test that also reports the face normal, for shading."""
-    o = box.rotation.T @ (origin - box.center)
-    d = dirs @ box.rotation
-    with np.errstate(divide="ignore", invalid="ignore"):
-        inv = 1.0 / d
-        t1 = (-box.half_extents - o) * inv
-        t2 = (box.half_extents - o) * inv
-    lo = np.minimum(t1, t2)
-    hi = np.maximum(t1, t2)
-    t_near = np.max(lo, axis=1)
-    t_far = np.min(hi, axis=1)
-    hit = (t_far >= np.maximum(t_near, 0.0)) & (t_near > 0.0)
-
-    axis = np.argmax(lo, axis=1)
-    local_n = np.zeros_like(dirs)
-    local_n[np.arange(len(dirs)), axis] = -np.sign(d[np.arange(len(dirs)), axis])
-    return np.where(hit, t_near, np.inf), local_n @ box.rotation.T
-
-
 def render(
     intrinsics: CameraIntrinsics,
     cam_r: Array,
     cam_t: Array,
-    boxes: list[Box],
-    terrain: Terrain,
+    caster: Raycaster,
+    classes: list[str],
     max_range: float = 90.0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Returns (H, W, 3) uint8 RGB and (H, W) uint16 instance ids (0 = none)."""
-    local = intrinsics.ray_directions()
-    world = local @ cam_r.T
+    """Returns (H, W, 3) uint8 RGB and (H, W) uint16 instance ids (0 = none).
 
-    t = terrain.intersect(cam_t, world)
-    source = np.full(t.shape, -1, dtype=np.int32)
-    normal = np.tile(np.array([0.0, 0.0, 1.0]), (len(world), 1))
-
-    for i, box in enumerate(boxes):
-        t_box, n_box = _intersect_box_normal(cam_t, world, box)
-        closer = t_box < t
-        t = np.where(closer, t_box, t)
-        source = np.where(closer, i, source)
-        normal = np.where(closer[:, None], n_box, normal)
+    `classes` is the class name of each actor the caster knows about, in the
+    same order, and is only used to pick an albedo -- the geometry all comes
+    back from the shared intersector.
+    """
+    world = intrinsics.ray_directions() @ cam_r.T
+    hits = caster.intersect(cam_t, world)
+    t, source, normal = hits.t, hits.source, hits.normal
 
     lambert = np.clip(np.abs(normal @ SUN), 0.0, 1.0)
     shade = (0.35 + 0.65 * lambert)[:, None]
@@ -119,11 +91,11 @@ def render(
     ground = (source < 0) & np.isfinite(t) & (t < max_range)
     rgb[ground] = np.array(GROUND) * shade[ground]
 
-    for i, box in enumerate(boxes):
+    for i, class_name in enumerate(classes):
         mask = source == i
         if not np.any(mask):
             continue
-        base = ALBEDO.get(box.class_name.split(".")[0], (0.7, 0.7, 0.7))
+        base = ALBEDO.get(class_name.split(".")[0], (0.7, 0.7, 0.7))
         rgb[mask] = np.array(base) * shade[mask]
 
     # Sky, blended toward the horizon by ray elevation.

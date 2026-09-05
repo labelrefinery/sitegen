@@ -22,6 +22,10 @@ def _cmd_generate(args: argparse.Namespace) -> None:
         camera_hz=args.camera_hz,
         camera_width=args.camera_width,
         camera_height=args.camera_height,
+        mesh_actors=args.actors == "meshes",
+        camera_renderer=args.camera_renderer,
+        camera_assets=args.camera_assets,
+        camera_samples=args.camera_samples,
     )
     print(f"wrote {args.out} ({args.out.stat().st_size / 1e6:.1f} MB)")
     for topic, n in sorted(counts.items()):
@@ -119,11 +123,39 @@ def main() -> None:
     )
     g.add_argument("--azimuth-steps", type=int, default=450)
     g.add_argument(
+        "--actors",
+        choices=("meshes", "boxes"),
+        default="meshes",
+        help="collision and label geometry. meshes is what both sensors see; "
+        "boxes is the oriented-cuboid renderer this started as, kept so the "
+        "measurements taken before the meshes existed stay reproducible",
+    )
+    g.add_argument(
         "--camera-hz",
         type=float,
         default=0.0,
-        help="render a forward camera at this rate (0 = off). Shaded geometry, "
-        "not photorealism -- see the README before pointing a VLM at it",
+        help="render the four-camera rig at this rate (0 = off)",
+    )
+    g.add_argument(
+        "--camera-renderer",
+        choices=("cycles", "raycast"),
+        default="cycles",
+        help="cycles renders the actor meshes in Blender under an HDRI and "
+        "needs --camera-assets; raycast is the flat-shaded path, instant and "
+        "dependency-free, and the one every pre-mesh number was measured on",
+    )
+    g.add_argument(
+        "--camera-assets",
+        type=Path,
+        help="directory holding the CC0 HDRI and gravel textures Cycles needs; "
+        "see docs/RENDERING.md for the three URLs",
+    )
+    g.add_argument(
+        "--camera-samples",
+        type=int,
+        default=48,
+        help="Cycles samples per pixel for the image; the instance-id pass is "
+        "always one sample, because an averaged object index is not one",
     )
     g.add_argument("--camera-width", type=int, default=960)
     g.add_argument("--camera-height", type=int, default=540)

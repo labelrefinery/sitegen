@@ -58,8 +58,8 @@ cloud (about 12% of returns), and nothing removes them for you.
 
 **The difficulty is in the sensor, not the scene.** Points on a target fall off
 as 1/r², range noise grows with distance, dropout rises quadratically, and dust
-eats returns over a region. A worker at 14 m gets about 20 points; a truck at
-45 m gets a handful. That is where naive clustering stops finding things, and
+eats returns over a region. A worker at 14 m gets about 11 points; a truck at
+45 m gets a few dozen. That is where naive clustering stops finding things, and
 where a smoother that carried the track forward from when it was close starts
 to pay.
 
@@ -70,8 +70,11 @@ trajectory for an annotation-free terrain labeler to calibrate against --
 which is the free supervision STONE-style methods depend on, exactly as joint
 angles are for the boom chain.
 
-**Nothing is balanced.** Terrain is ~83% of returns, the two workers together
-are ~0.3%. Real class imbalance, not a curated benchmark.
+**Nothing is balanced.** Terrain is ~79% of returns, the ego's own machine is
+~15%, and the two workers together are **0.14%**. Real class imbalance, not a
+curated benchmark — and it got twice as severe when the actors became meshes,
+because half the returns the old worker collected were returns off a cuboid a
+person does not fill.
 
 ## Use
 
@@ -87,6 +90,8 @@ uv run sitegen generate --out site.mcap --seed 1 --duration 60
 --truth-points-hz  per-point truth rate (default 2); boxes are always at --rate
 --difficulty       scales range noise, dropout and dust severity
 --azimuth-steps    horizontal resolution (default 450)
+--actors           meshes (default) or boxes, the geometry both sensors see
+--camera-hz        render the four-camera rig; see docs/RENDERING.md
 ```
 
 Roughly 1.4 MB of scene per second at defaults, so a 60 s run is ~85 MB.
@@ -169,13 +174,27 @@ pc.ParseFromString(raw)
 The number that makes the case is one curve: label quality against round, with
 the oracle as the ceiling.
 
-## The camera, and what it is not
+## The camera
 
-`--camera-hz 2` renders a forward-looking camera on the cab mast, using the
-same raycaster as the LiDAR — so a return in the cloud and a pixel in the image
-describe the same surface, because the same ray produced both. Per-pixel
-instance ids come out free, since the raycaster already knows which box each
-ray hit: segmentation ground truth nobody had to draw.
+`--camera-hz 2` renders the four-camera rig in Cycles from the same actor
+meshes the LiDAR just intersected — same triangles, same poses, only the
+shading differs. Per-pixel instance ids come out of a second one-sample pass
+where every surface emits its own id: segmentation ground truth nobody had to
+draw.
+
+A return in the cloud and a pixel in the image still describe the same surface.
+That used to be true by construction, because one raycaster drew both; with two
+renderers it is a claim about intrinsics, extrinsics and two optical
+conventions agreeing, so it is now measured. `tests/test_same_surface.py`
+projects LiDAR returns into every camera using only what the recording
+publishes and checks the held-out mask at that pixel: **99.84% land on their own
+instance, three of the four cameras exactly.**
+
+[docs/RENDERING.md](docs/RENDERING.md) has the whole of it — what each sensor
+sees, asset provenance, timings, and the acceptance table below in full.
+`--actors boxes` and `--camera-renderer raycast` still select the original
+cuboid geometry and flat-shaded renderer; `--actors boxes` reproduces the old
+recordings byte for byte.
 
 ### The rig is four cameras, and the placement matters more than it sounds
 
@@ -185,58 +204,49 @@ only detection it made. Real machines mount surround-view at the house corners
 for exactly this reason, so `SURROUND_RIG` does too: front-left and front-right
 at the corners panned 35° out, left and right on the sides panned 90°.
 
-Measured across seven swing angles, all four cameras: **0.0% ego occlusion,
-everywhere.** The cameras ride the house, so as the machine swings they sweep
-the whole site, and which one has the clear view changes with the dig cycle.
+Across all 480 instance masks of a 60 s recording, all four cameras: **the ego
+machine occupies 0 pixels.** The cameras ride the house, so as the machine
+swings they sweep the whole site, and which one has the clear view changes with
+the dig cycle.
 
 ### What an open-vocabulary detector makes of it
 
-Ten unobstructed views, Grounding DINO, prompt
-`"excavator . haul truck . worker . person ."`:
+Ten views chosen by the held-out masks, Grounding DINO, prompt
+`"excavator . haul truck . worker . person ."`, threshold 0.35. The baseline
+column is the *same ten views* re-rendered as boxes, so this is paired:
 
-| | |
-| --- | --- |
-| real construction photograph | `excavator` **0.858**, `haul truck` **0.771** |
-| sitegen renders, 9 of 10 | `haul truck` **0.351 – 0.421** — correct label, every time |
-| sitegen renders, 1 of 10 | nothing |
-| workers, visible in 3 views | **never detected, not once** |
-| grade stakes | never detected |
+| | boxes + raycast | meshes + Cycles |
+| --- | --- | --- |
+| **worker**, 11 sightings | 1 of 11, best 0.352 | **11 of 11**, 0.585–0.711, mean 0.660 |
+| **haul truck**, 5 sightings | 5 of 5, 0.370–0.443, mean 0.397 | **5 of 5**, 0.686–0.710, mean 0.699 |
+| real construction photograph | | `excavator` 0.858, `haul truck` 0.771 |
 
-The control proves the model, weights and prompt are fine. What the renders
-lack is texture and context, so confidence lands at ~0.38 against ~0.8 on a
-photograph — and a person, which is the safety-critical class, is invisible to
-it entirely.
+**The complementary-halves asymmetry is gone.** The README used to say that
+geometry finds the worker and cannot name the machine while the detector names
+the machine and cannot find the worker; that was a property of the box
+renderer, and [the probe](docs/PROBE-WORKER.md) proved it by changing one thing.
+Now the detector finds every worker, names it `worker` or `person` every time,
+and scores the haul truck within a hundredth of what it scores a real one in a
+photograph. The wheels did most of that: the box truck was two floating
+cuboids.
 
-**So: enough to build a naming pipeline on, not enough to trust its labels.**
-A 9-in-10 hit rate with a consistent correct label is plenty of signal to
-develop and test camera → detection → 3D-instance association, because the
-truck's real box is known. It is not a basis for *training* on those names, and
-anything built this way would name machines while silently leaving people
-unnamed.
+**What that is now enough for**, and what it still is not. Camera → detection →
+3D-instance association can be built and *evaluated* on this, including for the
+safety-critical class, because every detection has a known 3D box behind it.
+It is still not evidence that a student trained on these renders transfers to
+real imagery — a detector recognising a stylised human is a much weaker claim
+than its features being useful training signal. Only real imagery settles that.
 
-The two halves turn out to be complementary, which is the useful part:
-**geometry finds the worker and cannot name the machine; the detector names the
-machine and cannot find the worker.** The 97.5% size split covers the person
-case without a model at all. Raycasting the
-[3D-ConHE](https://www.mdpi.com/2076-3417/14/9/3599) meshes would narrow the
-gap; only real imagery closes it.
-
-That last claim is now measured rather than assumed.
-[docs/PROBE-WORKER.md](docs/PROBE-WORKER.md) re-renders these same ten views in
-Cycles under an outdoor HDRI with exactly one thing changed — the worker
-cuboid replaced by a rigged human in a hi-vis vest and hard hat. The worker
-goes from never detected to **11 of 11 sightings, mean 0.544**, labelled
-`worker person` every time. The truck, left as the same pair of boxes, does not
-move (0.469 to 0.463), and keeping the cuboid under the identical lighting and
-ground still detects nothing at all. **What the detector cannot see is the box,
-not the scene.**
+Two costs came with it. The detector now puts a second, confident `excavator`
+label on the haul truck in half the views (0.442–0.486, IoU 0.97 with the
+truck's own pixels); argmax still resolves it, but a pipeline consuming raw
+detections has to. And the *excavator itself cannot be tested from this rig at
+all* — there is one excavator on the site and it is the one carrying the
+cameras. Asked from a camera placed off the machine, the same weights score the
+excavator mesh **0.807** and **0.809**, against 0.858 for a real one.
 
 ## Not yet
 
-- Mesh geometry. Actors are oriented boxes; raycasting the 3D-ConHE meshes
-  would make the clouds look like real equipment and make size estimation
-  honest. The worker probe puts a number on what it would buy on the camera
-  side.
 - Terrain that changes. The stockpiles are static, so a cut/fill or
   volume-tracking pipeline has nothing to measure yet.
 

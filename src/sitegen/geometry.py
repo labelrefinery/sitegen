@@ -86,3 +86,71 @@ def box_at(
         class_name=class_name,
         instance_id=instance_id,
     )
+
+
+@dataclass(frozen=True)
+class Part:
+    """One rigid link: a mesh, where it is, and the cuboid that describes it.
+
+    A part carries both geometries because the two answer different questions.
+    `mesh` is what the sensors intersect -- the LiDAR against its triangles,
+    Cycles against the same triangles. `envelope` is the hand-written cuboid
+    the box renderer used, kept so `--actors boxes` still reproduces the old
+    numbers exactly rather than approximately.
+
+    Which one becomes the ground-truth cuboid depends on which one the sensors
+    saw, and that is the whole point: a label can never be more correct than
+    the geometry that produced the returns.
+    """
+
+    mesh: str
+    rotation: Array
+    translation: Array
+    envelope_center: Array
+    envelope_half: Array
+    class_name: str
+    instance_id: str
+
+    def box(self, from_mesh: bool) -> Box:
+        """The cuboid for `/ground_truth/actors`.
+
+        From a mesh it is the tight bounding box of the posed triangles, in the
+        link's own axes -- so it is oriented, not axis-aligned to the world, and
+        it grows to cover the parts the box model left out. The truck's wheels
+        are the visible case: its old cuboids started 0.6 m above the ground.
+        """
+        if from_mesh:
+            from .meshes import bounds
+
+            lo, hi = bounds(self.mesh)
+            center, half = (lo + hi) / 2.0, (hi - lo) / 2.0
+        else:
+            center, half = self.envelope_center, self.envelope_half
+        return Box(
+            center=self.rotation @ center + self.translation,
+            half_extents=half,
+            rotation=self.rotation,
+            class_name=self.class_name,
+            instance_id=self.instance_id,
+        )
+
+
+def part_at(
+    parent_r: Array,
+    parent_t: Array,
+    local_center: Array,
+    half_extents: Array,
+    mesh: str,
+    class_name: str,
+    instance_id: str,
+) -> Part:
+    """Place a link defined in a parent frame into the world frame."""
+    return Part(
+        mesh=mesh,
+        rotation=parent_r,
+        translation=parent_t,
+        envelope_center=local_center,
+        envelope_half=half_extents,
+        class_name=class_name,
+        instance_id=instance_id,
+    )

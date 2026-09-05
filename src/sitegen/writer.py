@@ -43,9 +43,11 @@ from google.protobuf.duration_pb2 import Duration
 from google.protobuf.timestamp_pb2 import Timestamp
 from mcap_protobuf.writer import Writer
 
-from .actors import HOUSE, SLEW_HEIGHT, sensor_pose
+from .actors import SLEW_HEIGHT, sensor_pose
 from .camera import SURROUND_RIG, CameraIntrinsics, camera_pose, render
+from .cycles import Shot, missing_assets, placements, run as run_cycles, write_job
 from .geometry import Array, Box, quat_from_matrix
+from .raycast import caster
 from .scene import Scene
 from .sensors import Lidar, sweep
 
@@ -132,6 +134,41 @@ def _cube(box: Box) -> CubePrimitive:
     )
 
 
+def _shots(
+    scene: Scene, frames: int, rate_hz: float, camera_every: int
+) -> list[Shot]:
+    """Every camera frame the run will contain, before any of it is rendered.
+
+    Cycles is a batch: one Blender process builds the site once and walks the
+    shots, because starting an interpreter and loading an HDRI per image would
+    cost more than the images do. So the scene has to be enumerated up front.
+    Re-deriving the states in the main loop rather than holding them is
+    deliberate -- `Scene` is a pure function of t, and two callers agreeing
+    because they both asked it is better than two callers agreeing because one
+    of them cached.
+    """
+    shots: list[Shot] = []
+    for i in range(frames):
+        if not camera_every or i % camera_every:
+            continue
+        state = scene.state_at(i / rate_hz)
+        house_r, _ = sensor_pose(state.ego)
+        house_t = np.array([state.ego.x, state.ego.y, SLEW_HEIGHT])
+        for cam_name, offset, pan in SURROUND_RIG:
+            cam_r, cam_t = camera_pose(house_r, house_t, np.array(offset), pan)
+            shots.append(
+                Shot(
+                    name=f"{cam_name}_{i:06d}",
+                    rotation=[[float(v) for v in row] for row in cam_r],
+                    translation=[float(v) for v in cam_t],
+                    objects=placements(
+                        state.parts, list(range(1, len(state.parts) + 1))
+                    ),
+                )
+            )
+    return shots
+
+
 def generate(
     out: Path,
     seed: int = 1,
@@ -144,9 +181,19 @@ def generate(
     camera_width: int = 960,
     camera_height: int = 540,
     camera_fov_deg: float = 78.0,
+    mesh_actors: bool = True,
+    camera_renderer: str = "cycles",
+    camera_assets: Path | None = None,
+    camera_samples: int = 48,
+    work_dir: Path | None = None,
 ) -> dict[str, int]:
     """Write one scene. Returns per-topic message counts."""
-    scene = Scene(seed=seed, duration_s=duration_s, difficulty=difficulty)
+    scene = Scene(
+        seed=seed,
+        duration_s=duration_s,
+        difficulty=difficulty,
+        mesh_actors=mesh_actors,
+    )
     lidar = Lidar(
         azimuth_steps=azimuth_steps,
         range_noise_per_m=0.0015 * difficulty,
@@ -164,6 +211,40 @@ def generate(
     intrinsics = CameraIntrinsics.from_fov(camera_width, camera_height, camera_fov_deg)
     frames = int(duration_s * rate_hz)
     base_ns = 1_700_000_000_000_000_000
+
+    # Cycles first, so the MCAP is written in one ordered pass afterwards.
+    renders: Path | None = None
+    if camera_every and camera_renderer == "cycles":
+        if not mesh_actors:
+            raise SystemExit(
+                "--camera-renderer cycles renders the actor meshes; "
+                "pass --camera-renderer raycast to keep --actors boxes"
+            )
+        assets = Path(camera_assets or "assets")
+        absent = missing_assets(assets)
+        if absent:
+            raise SystemExit(
+                f"missing render assets in {assets}: {', '.join(absent)}\n"
+                "They are CC0 downloads, listed with their URLs in "
+                "docs/RENDERING.md and src/sitegen/assets/CREDITS."
+            )
+        work = Path(work_dir or out.with_suffix(".render"))
+        renders = work / "frames"
+        shots = _shots(scene, frames, rate_hz, camera_every)
+        print(f"rendering {len(shots)} camera frames in Cycles...", flush=True)
+        run_cycles(
+            write_job(
+                work,
+                shots,
+                intrinsics=intrinsics,
+                assets=assets,
+                stockpiles=[
+                    (p.x, p.y, p.height) for p in scene.terrain.stockpiles
+                ],
+                samples=camera_samples,
+            ),
+            renders,
+        )
 
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "wb") as f, Writer(f) as w:
@@ -199,8 +280,9 @@ def generate(
             state = scene.state_at(t)
             sensor_r, sensor_t = sensor_pose(state.ego)
 
+            rays = caster(state.parts, state.boxes, scene.terrain, mesh_actors)
             points, source = sweep(
-                lidar, sensor_r, sensor_t, state.boxes, scene.terrain, rng, scene.dust, t
+                lidar, sensor_r, sensor_t, rays, rng, scene.dust, t
             )
 
             intensity = np.clip(1.0 - np.linalg.norm(points, axis=1) / lidar.max_range, 0.0, 1.0)
@@ -283,9 +365,20 @@ def generate(
                     cam_r, cam_t = camera_pose(
                         house_r, house_t, np.array(offset), pan
                     )
-                    image, instances = render(
-                        intrinsics, cam_r, cam_t, state.boxes, scene.terrain
-                    )
+                    if renders is not None:
+                        name = f"{cam_name}_{i:06d}"
+                        image = np.asarray(
+                            Image.open(renders / f"{name}.png").convert("RGB")
+                        )
+                        instances = np.load(renders / f"{name}.ids.npy")
+                    else:
+                        image, instances = render(
+                            intrinsics,
+                            cam_r,
+                            cam_t,
+                            rays,
+                            [b.class_name for b in state.boxes],
+                        )
                     buf = io.BytesIO()
                     Image.fromarray(image).save(buf, format="JPEG", quality=85)
                     w.write_message(
