@@ -211,10 +211,16 @@ def write_tf_csv(path: Path, out: Path) -> int:
         writer = csv.writer(fo)
         writer.writerow(["t", "x", "y", "z", "qx", "qy", "qz", "qw"])
         for _, _, msg in make_reader(f).iter_messages(topics=["/tf"]):
-            if base_ns is None:
-                base_ns = msg.log_time
             tf = FrameTransform()
             tf.ParseFromString(msg.data)
+            # The camera rig publishes map -> camera_<name> on the same topic.
+            # Without this filter a recording made with --camera-hz exports
+            # 840 rows for 600 sweeps, every stage pairs sweep i with a camera
+            # pose, and round 0 scores F1 0.14 instead of 0.53.
+            if tf.child_frame_id != "lidar":
+                continue
+            if base_ns is None:
+                base_ns = msg.log_time
             tr, q = tf.translation, tf.rotation
             writer.writerow(
                 [f"{(msg.log_time - base_ns) / 1e9:.4f}",
